@@ -1,0 +1,26 @@
+// Add these helper functions near your other helpers
+const stripTs = (s: string) =>
+  (s || '')
+    .replace(/^\[?\d{1,2}:\d{2}:\d{2}(?:\s?[AP]M)?\]?\s*/i, '')
+    .replace(/^\[?\d{1,2}\/\d{1,2}\/\d{2,4}\s+\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?\]?\s*/i, '')
+    .trim();
+
+const cleanName = (s: string) =>
+  stripTs(
+    (s || '')
+      .replace(/^"|"$/g, '')
+      .replace(/"/g, '')
+      .replace(/\{.*?\}/g, '')
+      .replace(/^corpse of\s+/i, '')
+      .trim()
+  );
+
+// Then USE them wherever you set source/target from regex matches, e.g.:
+//   ev.source = cleanName(m.groups.src);
+//   ev.target = cleanName(m.groups.tgt);
+
+// And when aggregating maps, make keys safe:
+//   const key = cleanName(e.source || '');
+//   const tgt = cleanName(e.target || '');
+//   per.set(key, ...);
+//   takenBy[tgt][key] += ...;

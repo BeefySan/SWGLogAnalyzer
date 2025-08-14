@@ -1,0 +1,2 @@
+--- parser.worker.ts patch for per-target data ---
+(see instructions in ChatGPT message)

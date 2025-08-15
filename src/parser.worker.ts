@@ -13,9 +13,11 @@ const T_TIME = /^(?:\[\s*Combat\s*\]\s*)?(\d{2}):(\d{2}):(\d{2})\s+/i;
 const toSec = (hh:string, mm:string, ss:string) => (+hh)*3600 + (+mm)*60 + (+ss);
 
 // ---------- Event regexes (run on the line *after* removing time) ----------
-const RX_DMG_WITH   = /^(.+?)\s+attacks\s+(.+?)\s+with\s+(.+?)\s+(?:and\s+)?(?:crits|hits|glances)?\s*for\s+(\d+)\s+points/i;
+// KEY CHANGE: accept "with" OR "using" to capture weapon/ability properly
+const RX_DMG_WITH   = /^(.+?)\s+attacks\s+(.+?)\s+(?:with|using)\s+(.+?)\s+(?:and\s+)?(?:crits|hits|glances)?\s*for\s+(\d+)\s+points/i;
 const RX_DMG_BARE   = /^(.+?)\s+attacks\s+(.+?)\s+(?:and\s+)?(?:crits|hits|glances)?\s*for\s+(\d+)\s+points/i;
-const RX_DMG_GENERIC= /^(.+?)\s+damages\s+(.+?)\s+for\s+(\d+)\s+points(?:\s+with\s+(.+?))?$/i;
+// Also accept "... with/using Ability" in the generic form
+const RX_DMG_GENERIC= /^(.+?)\s+damages\s+(.+?)\s+for\s+(\d+)\s+points(?:\s+(?:with|using)\s+(.+?))?$/i;
 const RX_DMG_DOT    = /^(.+?)\s+suffers\s+(\d+)\s+points\s+of\s+damage\s+from\s+(.+?)\s+over\s+time/i;
 const RX_HEAL       = /^(.+?)\s+heals\s+(.+?)\s+for\s+(\d+)\s+points(?:\s+with\s+(.+))?/i;
 
@@ -39,32 +41,26 @@ const NPC_PREFIXES = ["A ", "An ", "The "];
 function looksLikeNPC(name: string){ return NPC_PREFIXES.some(p => name.startsWith(p)); }
 
 const DEFAULT_ALIASES: Record<string,string> = {
-  // add more as needed:
   "Shepard EffectMass": "Shepard",
   "Lurcio Leering-Creeper": "Lurcio",
 };
 
 function stripJunk(s: string): string {
   let t = s.replace(/^[`'"]+|[`'"]+$/g, "").replace(/\s+/g, " ").trim();
-  // just in case a timestamp fragment leaked into the token:
   t = t.replace(/^\[\d{1,2}:\d{2}(?::\d{2})?\]\s*/, "");
   return t;
 }
 
-// Collapse "<Base> <Suffix>" → "Base" ONLY if Base already seen or explicitly aliased.
-// Won't touch NPCs (A/An/The …).
+// Allow multi-word/hyphen base + single TitleCase suffix; merge only if base seen.
+// Won't touch NPCs.
 function normalizeActorAlias(raw: string, seen: Set<string>, aliases: Record<string,string> = DEFAULT_ALIASES): string {
   const original = stripJunk(raw);
   if (!original) return "";
 
-  // explicit alias wins
   if (aliases[original]) return aliases[original];
-
-  // keep NPCs intact
   if (looksLikeNPC(original)) return original;
 
-  // Try one trailing token or hyphenated token as a title-like suffix
-  const m = original.match(/^([A-Za-z][\w']+)[\s-]+([A-Za-z][\w'-]+)$/);
+  const m = original.match(/^(.+?)\s+([A-Za-z][\w'-]+)$/);
   if (m) {
     const base = m[1];
     const suffix = m[2];
@@ -72,7 +68,6 @@ function normalizeActorAlias(raw: string, seen: Set<string>, aliases: Record<str
       return base;
     }
   }
-
   return original;
 }
 
@@ -96,43 +91,34 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
   const perTaken: Record<string, number> = {};
   const perTakenBy: Record<string, Record<string, number>> = {};
 
-  // Remember who cast which DoT on which target last (best-effort attribution)
-  // key = `${abilityNorm}||${dst}`
   const lastCasterForDot: Record<string,string> = {};
 
-  // Track actors we've already seen (used to safely merge aliases)
   const seenActors = new Set<string>();
   const aliasMap = DEFAULT_ALIASES;
 
   function pushDamage(t:number, src:string, dst:string, abilityRaw:string, amount:number, flags?:string){
     const abilityKey = normalizeAbilityName(abilityRaw || 'attack');
 
-    // event list
     damageEvents.push({ t, src, dst, ability: abilityRaw || abilityKey || 'attack', amount, flags });
 
-    // per-second DPS
     if (!dpsByActor[src]) dpsByActor[src] = [];
     dpsByActor[src][t] = (dpsByActor[src][t]||0) + amount;
 
-    // per-ability (by actor)
     if (!perAbility[src]) perAbility[src] = {};
     if (!perAbility[src][abilityKey]) perAbility[src][abilityKey] = { hits:0, dmg:0, max:0 };
     const pa = perAbility[src][abilityKey]; pa.hits++; pa.dmg += amount; if (amount>pa.max) pa.max = amount;
 
-    // per-ability targets
     if (!perAbilityTargets[src]) perAbilityTargets[src] = {};
     if (!perAbilityTargets[src][abilityKey]) perAbilityTargets[src][abilityKey] = {};
     if (!perAbilityTargets[src][abilityKey][dst]) perAbilityTargets[src][abilityKey][dst] = { hits:0, dmg:0, max:0 };
     const pt = perAbilityTargets[src][abilityKey][dst]; pt.hits++; pt.dmg += amount; if (amount>pt.max) pt.max = amount;
 
-    // damage taken
     if (src !== dst){
       perTaken[dst] = (perTaken[dst]||0) + amount;
       if (!perTakenBy[dst]) perTakenBy[dst] = {};
       perTakenBy[dst][src] = (perTakenBy[dst][src]||0) + amount;
     }
 
-    // remember last caster for DOT attributions (use normalized dst)
     if (!flags && abilityKey) {
       lastCasterForDot[`${abilityKey}||${dst}`] = src;
     }
@@ -160,7 +146,6 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
 
     let m: RegExpExecArray | null;
 
-    // Helper to normalize names safely
     const normNames = (srcRaw: string, dstRaw: string) => {
       const src0 = normActor(clean(srcRaw));
       const dst0 = clean(dstRaw);
@@ -168,31 +153,33 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       const src = src0 ? normalizeActorAlias(src0, seenActors, aliasMap) : '';
       const dst = normalizeActorAlias(dst0, seenActors, aliasMap);
 
-      // record after normalization (but don't record NPCs)
       if (src && !looksLikeNPC(src)) seenActors.add(src);
       if (dst && !looksLikeNPC(dst)) seenActors.add(dst);
 
       return { src, dst };
     };
 
-    // damage with ability
+    // damage with explicit weapon/ability (with|using …)
     if ((m = RX_DMG_WITH.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);
       const ability = clean(m[3]); const amount = +m[4];
       if (src){ pushDamage(t, src, dst, ability, amount); parsed++; continue; }
     }
-    // bare damage
+
+    // bare damage (no "with/using" fragment)
     if ((m = RX_DMG_BARE.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);
       const amount = +m[3];
       if (src){ pushDamage(t, src, dst, 'attack', amount); parsed++; continue; }
     }
-    // generic damage (… damages … for N points [with Ability])
+
+    // generic damage ("damages ... for N points [with|using Ability]")
     if ((m = RX_DMG_GENERIC.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);
       const amount = +m[3]; const ability = clean(m[4]||'attack');
       if (src){ pushDamage(t, src, dst, ability, amount); parsed++; continue; }
     }
+
     // periodic
     if ((m = RX_DMG_DOT.exec(rest))){
       const dstNormOnly = normalizeActorAlias(clean(m[1]), seenActors, aliasMap);
@@ -201,10 +188,11 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       const amount = +m[2];
       const abilityRaw = clean(m[3]);
       const key = normalizeAbilityName(abilityRaw);
-      const caster = lastCasterForDot[`${key}||${dstNormOnly}`] || ''; // best effort, else unattributed
+      const caster = lastCasterForDot[`${key}||${dstNormOnly}`] || '';
       pushDamage(t, caster || key || 'Periodic', dstNormOnly, abilityRaw, amount, 'periodic');
       parsed++; continue;
     }
+
     // healing
     if ((m = RX_HEAL.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);

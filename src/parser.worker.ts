@@ -22,20 +22,17 @@ type PerAbilityTargets = Record<string, Record<string, Record<string, { hits:num
 const T_TIME = /^(?:\[\s*Combat\s*\]\s*)?(\d{2}):(\d{2}):(\d{2})\s+/i;
 const toSec = (hh:string, mm:string, ss:string) => (+hh)*3600 + (+mm)*60 + (+ss);
 
-// ---------- Event regexes (run on the line *after* removing time) ----------
-// Capture swing type (hits|crits|glances|strikes through) and accept "with|using"
-const RX_DMG_WITH   =
+// ---------- Event regexes ----------
+const RX_DMG_WITH =
   /^(.+?)\s+attacks\s+(.+?)\s+(?:with|using)\s+(.+?)\s+(?:and\s+)?(?:(crits|hits|glances|strikes\s+through)(?:\s*\(\d+%.*?\))?)?\s*for\s+(\d+)\s+points/i;
 
-const RX_DMG_BARE   =
+const RX_DMG_BARE =
   /^(.+?)\s+attacks\s+(.+?)\s+(?:and\s+)?(?:(crits|hits|glances|strikes\s+through)(?:\s*\(\d+%.*?\))?)?\s*for\s+(\d+)\s+points/i;
 
-// Also accept "... with/using Ability" in the generic form
 const RX_DMG_GENERIC= /^(.+?)\s+damages\s+(.+?)\s+for\s+(\d+)\s+points(?:\s+(?:with|using)\s+(.+?))?$/i;
 const RX_DMG_DOT    = /^(.+?)\s+suffers\s+(\d+)\s+points\s+of\s+damage\s+from\s+(.+?)\s+over\s+time/i;
 
-// NEW: periodic ticks like "Beefy has caused Harwakokok the Mighty to take 2256 points of cold damage. (1330 absorbed)"
-// damage type (e.g., "poison", "cold") is captured as the ability
+// NEW periodic style
 const RX_DMG_CAUSED = /^(.+?)\s+(?:has\s+)?caused\s+(.+?)\s+to\s+take\s+(\d+)\s+points\s+(?:of\s+([A-Za-z '\-]+?)\s+)?damage\b.*$/i;
 
 // ---------- Defensive outcomes (expanded coverage) ----------
@@ -48,13 +45,7 @@ const RX_DODGE_PARRY_3 = /^(.+?)\s+(dodges|parries)\s+(.+?)'?s?\s+attack\b/i;
 // "Amero's attack is/was dodged/parried by Beefy"
 const RX_DODGE_PARRY_4 = /^(.+?)'?s?\s+attack\s+(?:is|was)\s+(dodged|parried)\s+by\s+(.+?)\b/i;
 
-// NEW: "… and misses (dodge|parry)."
-const RX_MISS_PAREN_WITH =
-  /^(.+?)\s+attacks\s+(.+?)\s+(?:with|using)\s+.*?\s+and\s+misses\s*\((dodge|parry)\)/i;
-const RX_MISS_PAREN_BARE =
-  /^(.+?)\s+attacks\s+(.+?)\s+.*?\s+misses\s*\((dodge|parry)\)/i;
-
-const RX_HEAL       = /^(.+?)\s+heals\s+(.+?)\s+for\s+(\d+)\s+points(?:\s+with\s+(.+))?/i;
+const RX_HEAL = /^(.+?)\s+heals\s+(.+?)\s+for\s+(\d+)\s+points(?:\s+with\s+(.+))?/i;
 
 // Helpers to extract block & armor-absorb from the full line
 const RX_POINTS_BLOCKED = /\((\d+)\s+points\s+blocked\)/i;
@@ -69,7 +60,7 @@ function normalizeAbilityName(raw?: string): string {
   let s = raw.toLowerCase().trim();
   s = s.replace(/^(with|using)\s+/, '');
   s = s.replace(/\s+and\s+(?:\d+\s+points\s+blocked|(?:strikes\s+through|hits|glances|crits)(?:\s+\(\d+%.*?\))?)/g, '');
-  s = s.replace(/[\(\[][^)\]]*[\)\]]/g, '');  // drop (…) / […]
+  s = s.replace(/[\(\[][^)\]]*[\)\]]/g, '');
   s = s.replace(/\bmark\s*\d+\b/gi, '').replace(/\b[ivxlcdm]+\b/gi, '').replace(/\b\d+\b/g, '');
   s = s.replace(/[:\-–—]+/g, ' ').replace(/\s+/g, ' ').trim();
   return s;
@@ -90,8 +81,6 @@ function stripJunk(s: string): string {
   return t;
 }
 
-// Allow multi-word/hyphen base + single TitleCase suffix; merge only if base seen.
-// Won't touch NPCs.
 function normalizeActorAlias(raw: string, seen: Set<string>, aliases: Record<string,string> = DEFAULT_ALIASES): string {
   const original = stripJunk(raw);
   if (!original) return "";
@@ -113,7 +102,25 @@ function normalizeActorAlias(raw: string, seen: Set<string>, aliases: Record<str
 // ---------- Worker ----------
 self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>{
   const { text, collectUnparsed } = ev.data || { text:'' };
-  const lines = (text||'').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+
+  // Normalize newlines and DE-DUPE only *consecutive* exact duplicates.
+  const rawLines = (text||'').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+
+  function dedupeConsecutive(arr: string[]): { lines: string[]; removed: number } {
+    const out: string[] = [];
+    let prevKey: string | undefined;
+    let removed = 0;
+    for (const ln of arr) {
+      if (!ln) continue; // drop empty
+      const key = ln.replace(/\s+$/,''); // ignore trailing whitespace only
+      if (key === prevKey) { removed++; continue; } // drop only if same as immediate previous
+      out.push(ln);
+      prevKey = key;
+    }
+    return { lines: out, removed };
+  }
+
+  const { lines, removed: duplicatesDropped } = dedupeConsecutive(rawLines);
 
   let baseAbs: number | null = null;
   let maxAbs = 0, parsed = 0;
@@ -176,7 +183,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       }
     }
 
-    // Remember the last caster for DoT keying
+    // Remember last caster for DoT attribution
     if (!flags && abilityKey) {
       lastCasterForDot[`${abilityKey}||${dst}`] = src;
     }
@@ -221,7 +228,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       return { src, dst };
     };
 
-    // ---------- Defensive outcomes first (no damage amounts) ----------
+    // ---------- Defensive outcomes ----------
     if ((m = RX_DODGE_PARRY_1.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);
       const flag = (m[3]||'').toLowerCase() as 'dodges'|'parries';
@@ -233,38 +240,28 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       if (src) { pushOutcome(t, src, dst, flag === 'dodges' ? 'dodge' : 'parry'); parsed++; continue; }
     }
     if ((m = RX_DODGE_PARRY_3.exec(rest))){
-      // "Beefy dodges Amero's attack"
-      const dst = normalizeActorAlias(clean(m[1]), seenActors, aliasMap); // defender first
+      const dst = normalizeActorAlias(clean(m[1]), seenActors, aliasMap);
       const flag = (m[2]||'').toLowerCase();
       const src = normalizeActorAlias(clean(m[3]), seenActors, aliasMap);
       if (src && dst) { pushOutcome(t, src, dst, flag === 'dodges' ? 'dodge' : 'parry'); parsed++; continue; }
     }
     if ((m = RX_DODGE_PARRY_4.exec(rest))){
-      // "Amero's attack was dodged by Beefy"
-      const src = normalizeActorAlias(clean(m[1]), seenActors, aliasMap); // attacker
-      const flagPast = (m[2]||'').toLowerCase(); // dodged|parried
-      const dst = normalizeActorAlias(clean(m[3]), seenActors, aliasMap); // defender
-      if (src && dst) {
-        const flag = flagPast === 'dodged' ? 'dodge' : 'parry';
-        pushOutcome(t, src, dst, flag); parsed++; continue;
-      }
-    }
-    // NEW: "… and misses (dodge|parry)."
-    if ((m = RX_MISS_PAREN_WITH.exec(rest)) || (m = RX_MISS_PAREN_BARE.exec(rest))) {
-      const { src, dst } = normNames(m[1], m[2]);
-      const flag = (m[3]||'').toLowerCase() as 'dodge'|'parry';
-      if (src) { pushOutcome(t, src, dst, flag); parsed++; continue; }
+      const src = normalizeActorAlias(clean(m[1]), seenActors, aliasMap);
+      const flagPast = (m[2]||'').toLowerCase();
+      const dst = normalizeActorAlias(clean(m[3]), seenActors, aliasMap);
+      if (src && dst) { pushOutcome(t, src, dst, flagPast === 'dodged' ? 'dodge' : 'parry'); parsed++; continue; }
     }
 
-    // Helpers for block/absorb on damage lines
-    const blockedMatch = rest.match(RX_POINTS_BLOCKED);
-    const blockedAmt = blockedMatch ? +blockedMatch[1] : undefined;
-    const absorbMatch = rest.match(RX_ARMOR_ABSORB);
-    const absorbedAmt = absorbMatch ? +absorbMatch[1] : undefined;
-    const preMitTotal = absorbMatch ? +absorbMatch[2] : undefined;
+// Helpers for block/absorb on damage lines
+const blockedMatch = rest.match(RX_POINTS_BLOCKED);
+const blockedAmt = blockedMatch ? +blockedMatch[1] : undefined;
+
+const absorbMatch = rest.match(RX_ARMOR_ABSORB);   // <-- add this
+const absorbedAmt = absorbMatch ? +absorbMatch[1] : undefined;
+const preMitTotal = absorbMatch ? +absorbMatch[2] : undefined;
 
 
-    // ---------- Damage with explicit weapon/ability (with|using …) ----------
+    // ---------- Damage parsing ----------
     if ((m = RX_DMG_WITH.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);
       const ability = clean(m[3]);
@@ -283,7 +280,6 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       }
     }
 
-    // ---------- Bare damage (no "with/using" fragment) ----------
     if ((m = RX_DMG_BARE.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);
       const kindRaw = (m[3]||'').toLowerCase().replace(/\s+/g,' ');
@@ -301,7 +297,6 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       }
     }
 
-    // ---------- Generic damage ("damages ... for N points [with|using Ability]") ----------
     if ((m = RX_DMG_GENERIC.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);
       const amount = +m[3];
@@ -312,7 +307,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       }
     }
 
-    // ---------- Periodic: "X suffers N points of damage from Y over time" ----------
+    // periodic forms
     if ((m = RX_DMG_DOT.exec(rest))){
       const dstNormOnly = normalizeActorAlias(clean(m[1]), seenActors, aliasMap);
       if (dstNormOnly && !looksLikeNPC(dstNormOnly)) seenActors.add(dstNormOnly);
@@ -325,11 +320,10 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       parsed++; continue;
     }
 
-    // ---------- NEW periodic: "Beefy has caused ... to take N points of <type> damage" ----------
     if ((m = RX_DMG_CAUSED.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);
       const amount = +m[3];
-      const dtype = clean(m[4] || 'Periodic'); // use damage type (poison/cold) as ability name
+      const dtype = clean(m[4] || 'Periodic');
       if (src){ pushDamage(t, src, dst, dtype, amount, 'periodic'); parsed++; continue; }
     }
 
@@ -369,7 +363,14 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
     perTaken,
     perTakenBy,
     duration: maxAbs,
-    debug: { parsed, totalLines: lines.length, duration: maxAbs, unparsed: collectUnparsed ? unparsed.length : 0 },
+    debug: {
+      parsed,
+      totalLines: rawLines.length,   // before de-dupe
+      uniqueLines: lines.length,     // after consecutive de-dupe
+      duplicatesDropped,             // number removed
+      duration: maxAbs,
+      unparsed: collectUnparsed ? unparsed.length : 0
+    },
     damageEvents,
     healEvents,
   };

@@ -13,12 +13,15 @@ type MetricKey = 'damageDealt'|'avgDps'|'healingDone';
 type PlayerRow = { name:string; profession?:string; damageDealt:number; healingDone:number; avgDps:number };
 
 type DamageEvent = {
-  t: number;          // seconds from start
-  src: string;        // attacker
-  dst: string;        // target
+  t: number;
+  src: string;
+  dst: string;
   ability: string;
   amount: number;
-  flags?: string;     // e.g., 'crit', 'glance', 'periodic'
+  flags?: string;        // 'hit' | 'crit' | 'glance' | 'strikethrough' | 'periodic' | 'dodge' | 'parry'
+  blocked?: number;      // "(N points blocked)" parsed from the line
+  absorbed?: number;     // "Armor absorbed N points ..."
+  preMitTotal?: number;  // "... out of T" (pre-mit total)
 };
 
 type HealEvent = {
@@ -158,7 +161,7 @@ const NPC_TO_INSTANCE: Array<{ npc:string; inst:string }> = [
   { npc: 'tusken king', inst: 'Tusken King' },
   { npc: 'axkva min', inst: 'Axkva Min' },
   { npc: 'ig-88', inst: 'IG-88' },
-  { npc: 'exar kun', inst: 'Exar Kun' },
+  { npc: 'exar kun', 'inst': 'Exar Kun' },
   { npc: 'cmdr kenkirk', inst: 'ISD' },
   { npc: 'commander kenkirk', inst: 'ISD' },
   { npc: 'krix swiftshadow', inst: 'ISD' },
@@ -311,7 +314,7 @@ export default function App(){
   const [parsing, setParsing] = useState<{done:number,total:number}|null>(null);
   const [compareOn, setCompareOn] = useState(true);
   const [pA, setPA] = useState(''); const [pB, setPB] = useState('');
-  const [mode, setMode] = useState<'sources'|'abilities'>('sources');
+  const [mode, setMode] = useState<'sources'|'abilities'|'statistics'>('sources'); // <- extended
   const [smooth, setSmooth] = useState(true);
   const workerRef = useRef<Worker|null>(null);
 
@@ -427,12 +430,10 @@ export default function App(){
 
   // recompute filtered aggregates for current window
   function applyWindow(window: {start:number; end:number} | null, base:{
-    tl: any[], rows:PlayerRow[], perSrc:Record<string,number[]>, perAbility:PerAbility, pat:PerAbilityTargets,
+    tl: any[], rows:PlayerRow[], perSrc:Record<string,number[]>, perAbility:PerAbility, pat: PerAbilityTargets,
     perTaken:Record<string,number>, perTakenBy:Record<string,Record<string,number>>, duration:number
   }){
     if (!window){
-      // (Not used anymore for "— none —", we always pass a full-window,
-      // but keep this path for completeness.)
       setRows(base.rows);
       setTimeline(base.tl);
       setPerSrc(base.perSrc);
@@ -706,6 +707,7 @@ export default function App(){
       <div className="tabbar">
         <button className={"tab" + (mode==='sources'?' active':'')} onClick={()=>setMode('sources')}>Sources</button>
         <button className={"tab" + (mode==='abilities'?' active':'')} onClick={()=>setMode('abilities')}>Abilities</button>
+        <button className={"tab" + (mode==='statistics'?' active':'')} onClick={()=>setMode('statistics')}>Statistics</button>
       </div>
 
       {mode==='sources' ? (
@@ -715,7 +717,7 @@ export default function App(){
           {renderPanel(`Damage Taken By Source${(compareOn && (pA||pB)) ? ' — ' + (pA||pB) : ''}`, takenFor, rows, 'damageDealt', false, '', '', ()=>{}, inferredClasses)}
           {renderPanel('Actions per Minute (APM)', listAPM, rows, 'damageDealt', false, '', '', ()=>{}, inferredClasses)}
         </div>
-      ) : (
+      ) : mode==='abilities' ? (
         <div className="card" style={{ marginTop:16 }}>
           <div style={{ padding:'12px 14px', borderBottom:'1px solid #1b2738', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
             <div style={{ fontSize:13, fontWeight:800, color:'#9fb7d8', letterSpacing:.3 }}>Abilities — {(pA || names[0] || 'No player selected')}</div>
@@ -735,103 +737,152 @@ export default function App(){
                   <th>% of Player</th>
                 </tr>
               </thead>
-              <tbody>
-                {(() => {
-                  const player = pA || names[0];
-                  if (!player) return null;
-                  const map = (perAbility[player] || {}) as Record<string,{hits:number;dmg:number;max:number}>;
-                  const entries = Object.entries(map);
-                  const total = entries.reduce((sum, [,v]) => sum + (v?.dmg || 0), 0);
-                  return entries
-                    .map(([ability, v])=> ({ ability, hits:v.hits, damage:v.dmg, avg:v.hits?v.dmg/v.hits:0, max:v.max }))
-                    .sort((a,b)=> b.damage-a.damage)
-                    .flatMap(r=> {
-                      const isOpen = openAbility === r.ability;
-                      const targetsMap = ((perAbilityTargets[player] || {})[r.ability]) || {};
-                      const targets = Object.entries(targetsMap).map(([t, sv])=> ({
-                        target: t,
-                        hits: (sv as any)?.hits||0,
-                        damage: (sv as any)?.dmg||0,
-                        avg: ((sv as any)?.hits? ((sv as any).dmg/(sv as any).hits) : 0),
-                        max: (sv as any)?.max||0
-                      })).sort((a,b)=> b.damage-a.damage);
-                      return [
-                        (<tr key={r.ability}>
-                          <td className="muted">
-                            <button className="btn" style={{padding:'2px 8px'}} onClick={()=> setOpenAbility(isOpen ? '' : r.ability)}>
-                              {isOpen ? '▾' : '▸'}
-                            </button>{' '}{r.ability}
-                          </td>
-                          <td>{fmt0(r.hits)}</td>
-                          <td>{fmt0(r.damage)}</td>
-                          <td>{fmt0(r.avg)}</td>
-                          <td>{fmt0(r.max)}</td>
-                          <td className="muted">{total>0 ? `${(r.damage/total*100).toFixed(1)}%` : '—'}</td>
-                        </tr>),
-                        (isOpen ? (
-                          <tr key={r.ability + ':targets'}>
-                            <td colSpan={6}>
-                              {targets.length ? (
-                                <div
-                                  style={{
-                                    padding:'6px 8px',
-                                    background:'#0e1724',
-                                    borderWidth:1,
-                                    borderStyle:'solid',
-                                    borderColor:'#1b2738',
-                                    borderRadius:8
-                                  }}
-                                >
-                                  <div style={{fontSize:12, color:'#9fb7d8', marginBottom:6}}>Target breakdown for <b>{r.ability}</b></div>
-                                  <table className="table" style={{margin:0}}>
-                                    <thead>
-                                      <tr>
-                                        <th>Target</th>
-                                        <th>Hits</th>
-                                        <th>Damage</th>
-                                        <th>Avg</th>
-                                        <th>Max</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {targets.map(t => (
-                                        <tr key={t.target}>
-                                          <td className="muted">{t.target}</td>
-                                          <td>{fmt0(t.hits)}</td>
-                                          <td>{fmt0(t.damage)}</td>
-                                          <td>{fmt0(t.avg)}</td>
-                                          <td>{fmt0(t.max)}</td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-                              ) : (
-                                <div
-                                  style={{
-                                    padding:'8px 10px',
-                                    background:'#0e1724',
-                                    borderWidth:1,
-                                    borderStyle:'solid',
-                                    borderColor:'#1b2738',
-                                    borderRadius:8,
-                                    color:'#9fb7d8',
-                                    fontSize:12
-                                  }}
-                                >
-                                  No per-target data available for this ability.
-                                </div>
-                              )}
-                            </td>
+<tbody>
+  {(() => {
+    const player = pA || names[0];
+    if (!player) return null;
+
+    // Current window bounds
+    const winStart = timeline[0]?.t ?? 0;
+    const winEnd   = timeline.length ? timeline[timeline.length - 1].t : duration;
+
+    // Collect abilities that ticked as DoT for this player in the window
+    const dotAbilities = new Set(
+      damageEvents
+        .filter(e =>
+          e.t >= winStart &&
+          e.t <= winEnd &&
+          e.src === player &&
+          e.flags === 'periodic'
+        )
+        .map(e => normalizeAbilityName(e.ability))
+    );
+
+    const map = (perAbility[player] || {}) as Record<string,{hits:number;dmg:number;max:number}>;
+    const entries = Object.entries(map);
+    const total = entries.reduce((sum, [,v]) => sum + (v?.dmg || 0), 0);
+
+    return entries
+      .map(([ability, v])=> ({
+        ability,
+        hits: v.hits,
+        damage: v.dmg,
+        avg: v.hits ? v.dmg / v.hits : 0,
+        max: v.max
+      }))
+      .sort((a,b)=> b.damage - a.damage)
+      .flatMap(r => {
+        const isOpen = openAbility === r.ability;
+        const targetsMap = ((perAbilityTargets[player] || {})[r.ability]) || {};
+        const targets = Object.entries(targetsMap).map(([t, sv])=> ({
+          target: t,
+          hits: (sv as any)?.hits || 0,
+          damage: (sv as any)?.dmg || 0,
+          avg: (sv as any)?.hits ? (sv as any).dmg / (sv as any).hits : 0,
+          max: (sv as any)?.max || 0
+        })).sort((a,b)=> b.damage - a.damage);
+
+        const isDoT = dotAbilities.has(normalizeAbilityName(r.ability));
+
+        return [
+          (
+            <tr key={r.ability}>
+              <td className="muted">
+                <button
+                  className="btn"
+                  style={{padding:'2px 8px'}}
+                  onClick={()=> setOpenAbility(isOpen ? '' : r.ability)}
+                >
+                  {isOpen ? '▾' : '▸'}
+                </button>{' '}
+                {r.ability}{isDoT ? ' (Damage over Time)' : ''}
+              </td>
+              <td>{fmt0(r.hits)}</td>
+              <td>{fmt0(r.damage)}</td>
+              <td>{fmt0(r.avg)}</td>
+              <td>{fmt0(r.max)}</td>
+              <td className="muted">{total>0 ? `${(r.damage/total*100).toFixed(1)}%` : '—'}</td>
+            </tr>
+          ),
+          isOpen ? (
+            <tr key={r.ability + ':targets'}>
+              <td colSpan={6}>
+                {targets.length ? (
+                  <div
+                    style={{
+                      padding:'6px 8px',
+                      background:'#0e1724',
+                      borderWidth:1,
+                      borderStyle:'solid',
+                      borderColor:'#1b2738',
+                      borderRadius:8
+                    }}
+                  >
+                    <div style={{fontSize:12, color:'#9fb7d8', marginBottom:6}}>
+                      Target breakdown for <b>{r.ability}</b>{isDoT ? ' (Damage over Time)' : ''}
+                    </div>
+                    <table className="table" style={{margin:0}}>
+                      <thead>
+                        <tr>
+                          <th>Target</th>
+                          <th>Hits</th>
+                          <th>Damage</th>
+                          <th>Avg</th>
+                          <th>Max</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {targets.map(t => (
+                          <tr key={t.target}>
+                            <td className="muted">{t.target}</td>
+                            <td>{fmt0(t.hits)}</td>
+                            <td>{fmt0(t.damage)}</td>
+                            <td>{fmt0(t.avg)}</td>
+                            <td>{fmt0(t.max)}</td>
                           </tr>
-                        ) : null)
-                      ].filter(Boolean) as any;
-                    });
-                })()}
-              </tbody>
-            </table>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      padding:'8px 10px',
+                      background:'#0e1724',
+                      borderWidth:1,
+                      borderStyle:'solid',
+                      borderColor:'#1b2738',
+                      borderRadius:8,
+                      color:'#9fb7d8',
+                      fontSize:12
+                    }}
+                  >
+                    No per-target data available for this ability.
+                  </div>
+                )}
+              </td>
+            </tr>
+          ) : null
+        ].filter(Boolean) as any;
+      });
+  })()}
+</tbody>
+
+                         </table>
           </div>
         </div>
+      ) : (
+        /* ===================== Statistics tab ===================== */
+        <StatisticsTab
+          actor={pA || ''}
+          damageEvents={damageEvents}
+          healEvents={healEvents}
+          perAbility={perAbility}
+          perTaken={perTaken}
+          perTakenBy={perTakenBy}
+          windowStart={timeline[0]?.t ?? 0}
+          windowEnd={timeline.length ? timeline[timeline.length-1].t : duration}
+        />
       )}
     </div>
   </ErrorBoundary>;
@@ -872,4 +923,191 @@ function renderPanel(
       </ResponsiveContainer>
     </div>
   </div>;
+}
+
+/* ========================= Statistics Tab Component ========================= */
+
+function StatisticsTab({
+  actor,
+  damageEvents,
+  healEvents,
+  perAbility,
+  perTaken,
+  perTakenBy,
+  windowStart,
+  windowEnd,
+}: {
+  actor: string;
+  damageEvents: DamageEvent[];
+  healEvents: HealEvent[];
+  perAbility: PerAbility;
+  perTaken: Record<string, number>;
+  perTakenBy: Record<string, Record<string, number>>;
+  windowStart: number;
+  windowEnd: number;
+}) {
+  const hasActor = !!actor;
+  const dur = Math.max(1, windowEnd - windowStart + 1);
+
+  // Windowed slices
+  const dEvAll = useMemo(
+    () => damageEvents.filter(e => e.t >= windowStart && e.t <= windowEnd),
+    [damageEvents, windowStart, windowEnd]
+  );
+  const dEvByActor = useMemo(
+    () => (hasActor ? dEvAll.filter(e => e.src === actor) : dEvAll),
+    [dEvAll, hasActor, actor]
+  );
+  const dEvIncoming = useMemo(
+    () => (hasActor ? dEvAll.filter(e => e.dst === actor) : []),
+    [dEvAll, hasActor, actor]
+  );
+  const hEvSrc = useMemo(
+    () => healEvents.filter(e => e.t >= windowStart && e.t <= windowEnd && (!hasActor || e.src === actor)),
+    [healEvents, windowStart, windowEnd, hasActor, actor]
+  );
+  const hEvDst = useMemo(
+    () => (hasActor ? healEvents.filter(e => e.t >= windowStart && e.t <= windowEnd && e.dst === actor) : []),
+    [healEvents, windowStart, windowEnd, hasActor, actor]
+  );
+
+  // ========================= Offensive aggregates =========================
+  const totalDmg = dEvByActor.reduce((s,e)=> s + e.amount, 0);
+  const dotDmg   = dEvByActor.filter(e => e.flags === 'periodic').reduce((s,e)=> s + e.amount, 0);
+  const directDmg= totalDmg - dotDmg;
+  const maxHit   = dEvByActor.reduce((m,e)=> Math.max(m, e.amount), 0);
+  const targets  = new Set(dEvByActor.map(e => e.dst)).size;
+  const abilitiesUsed = hasActor ? Object.keys(perAbility[actor] || {}).length : 0;
+  const actions  = dEvByActor.length + hEvSrc.length;
+  const apm      = actions / (dur / 60);
+
+  // Direct swings by flag (exclude DoTs)
+  const swings = dEvByActor.filter(e => e.flags !== 'periodic');
+  let hitCount=0, critCount=0, stCount=0, hitDmg=0, critDmg=0, stDmg=0;
+  for (const e of swings){
+    const f = (e.flags || 'hit');
+    if (f === 'crit') { critCount++; critDmg += e.amount; }
+    else if (f === 'strikethrough') { stCount++; stDmg += e.amount; }
+    else { hitCount++; hitDmg += e.amount; }
+  }
+  const totalSwings = swings.length || 1;
+  const pct = (n:number, d:number)=> d ? (n/d*100) : 0;
+
+  const hitDmgPct   = pct(hitDmg, totalDmg);
+  const critDmgPct  = pct(critDmg, totalDmg);
+  const stDmgPct    = pct(stDmg, totalDmg);
+  const hitChancePct  = pct(hitCount, totalSwings);
+  const critChancePct = pct(critCount, totalSwings);
+  const stChancePct   = pct(stCount, totalSwings);
+
+  // ========================= Defensive aggregates =========================
+  // Consider incoming direct interactions (exclude DoTs)
+  const incomingDirect = dEvIncoming.filter(e => e.flags !== 'periodic');
+  const hitsTakenDirect = incomingDirect.filter(e => e.amount > 0).length;
+
+  // Dodge / Parry: count zero-damage outcomes; denom = hitsTaken + outcomeCount
+  const dodgeCount = incomingDirect.filter(e => e.flags === 'dodge').length;
+  const parryCount = incomingDirect.filter(e => e.flags === 'parry').length;
+  const dodgeChance = pct(dodgeCount, hitsTakenDirect + dodgeCount);
+  const parryChance = pct(parryCount, hitsTakenDirect + parryCount);
+
+  // Block: hits that landed and had "(N points blocked)"
+  const blockEvents = incomingDirect.filter(e => (e.blocked || 0) > 0 && e.amount > 0);
+  const blockCount = blockEvents.length;
+  const totalBlocked = blockEvents.reduce((s,e)=> s + (e.blocked || 0), 0);
+  const avgBlocked = blockCount ? (totalBlocked / blockCount) : 0;
+  // Block chance as fraction of all landed hits
+  const blockChance = pct(blockCount, hitsTakenDirect);
+
+  // Armor mitigation: average of (absorbed / preMitTotal) for events that include both numbers
+  const mitSamples = incomingDirect.filter(e => (e.absorbed ?? 0) > 0 && (e.preMitTotal ?? 0) > 0);
+  const avgArmorMitigation = mitSamples.length
+    ? (mitSamples.reduce((s,e)=> s + (Number(e.absorbed)/Number(e.preMitTotal)), 0) / mitSamples.length * 100)
+    : 0;
+
+  // Keep the original "Damage Taken" based on totals we already have
+  const dmgTaken = hasActor ? (perTaken[actor] || 0) : 0;
+  // Update "Hits Taken" to mean landed direct hits (no DoTs, no dodges/parries)
+  const hitsTaken = hitsTakenDirect;
+  const dpmTaken  = dmgTaken / (dur / 60);
+  const healsRecv = hEvDst.reduce((s,e)=> s + e.amount, 0);
+  const selfHeal  = hasActor ? hEvDst.filter(e => e.src === actor).reduce((s,e)=> s + e.amount, 0) : 0;
+
+  const attackers = hasActor
+    ? Object.entries(perTakenBy[actor] || {}).sort((a,b)=> b[1]-a[1]).slice(0, 6)
+    : [];
+
+  // Layout
+  const gridStyle: React.CSSProperties = { display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, marginTop:16 };
+  const card: React.CSSProperties = { padding:12, borderRadius:10, background:'rgba(255,255,255,0.03)', border:'1px solid rgba(255,255,255,0.08)' };
+  const th: React.CSSProperties = { textAlign:'left', opacity:0.8, fontWeight:600, padding:'6px 8px' };
+  const td: React.CSSProperties = { textAlign:'right', padding:'6px 8px', fontVariantNumeric:'tabular-nums' };
+  const title: React.CSSProperties = { margin:'0 0 8px 0', fontSize:14, fontWeight:700, opacity:0.9 };
+  const labelSuffix = hasActor ? ` — ${actor}` : '';
+
+  const fmtPct1 = (v:number)=> `${v.toFixed(1)}%`;
+
+  return (
+    <div style={gridStyle}>
+      {/* Offensive */}
+      <div className="card" style={card}>
+        <h3 style={title}>Offensive Statistics{labelSuffix}</h3>
+        <table className="table" style={{ width:'100%', borderCollapse:'collapse' }}>
+          <tbody>
+            <tr><th style={th}>Total Damage</th><td style={td}>{fmt0(totalDmg)}</td></tr>
+            <tr><th style={th}>Direct Damage</th><td style={td}>{fmt0(directDmg)} {totalDmg ? `(${((directDmg/totalDmg)*100).toFixed(1)}%)` : ''}</td></tr>
+            <tr><th style={th}>DoT Damage</th><td style={td}>{fmt0(dotDmg)} {totalDmg ? `(${((dotDmg/totalDmg)*100).toFixed(1)}%)` : ''}</td></tr>
+            <tr><th style={th}>Max Hit</th><td style={td}>{fmt0(maxHit)}</td></tr>
+            <tr><th style={th}>Unique Targets Hit</th><td style={td}>{fmt0(targets)}</td></tr>
+            <tr><th style={th}>Abilities Used</th><td style={td}>{fmt0(abilitiesUsed)}</td></tr>
+            <tr><th style={th}>Actions per Minute (APM)</th><td style={td}>{fmt1(apm)}</td></tr>
+
+            <tr><th style={th}>Hit Chance</th><td style={td}>{fmt0(hitCount)} ({fmtPct1(hitChancePct)})</td></tr>
+            <tr><th style={th}>Critical Chance</th><td style={td}>{fmt0(critCount)} ({fmtPct1(critChancePct)})</td></tr>
+            <tr><th style={th}>Strikethrough Chance</th><td style={td}>{fmt0(stCount)} ({fmtPct1(stChancePct)})</td></tr>
+
+            <tr><th style={th}>Hit Damage % of Total</th><td style={td}>{fmt0(hitDmg)} {totalDmg ? `(${hitDmgPct.toFixed(1)}%)` : ''}</td></tr>
+            <tr><th style={th}>Critical Damage % of Total</th><td style={td}>{fmt0(critDmg)} {totalDmg ? `(${critDmgPct.toFixed(1)}%)` : ''}</td></tr>
+            <tr><th style={th}>Strikethrough Damage % of Total</th><td style={td}>{fmt0(stDmg)} {totalDmg ? `(${stDmgPct.toFixed(1)}%)` : ''}</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      {/* Defensive */}
+      <div className="card" style={card}>
+        <h3 style={title}>Defensive Statistics{labelSuffix}</h3>
+        <table className="table" style={{ width:'100%', borderCollapse:'collapse' }}>
+          <tbody>
+            <tr><th style={th}>Damage Taken</th><td style={td}>{fmt0(dmgTaken)}</td></tr>
+            <tr><th style={th}>Damage Taken / min</th><td style={td}>{fmt0(dpmTaken)}</td></tr>
+            <tr><th style={th}>Hits Taken</th><td style={td}>{fmt0(hitsTaken)}</td></tr>
+            <tr><th style={th}>Heals Received</th><td style={td}>{fmt0(healsRecv)}</td></tr>
+            <tr><th style={th}>Self-Healing</th><td style={td}>{fmt0(selfHeal)}</td></tr>
+
+            {/* New defensive rows */}
+            <tr><th style={th}>Dodge Chance</th><td style={td}>{fmt0(dodgeCount)} ({fmtPct1(dodgeChance)})</td></tr>
+            <tr><th style={th}>Parry Chance</th><td style={td}>{fmt0(parryCount)} ({fmtPct1(parryChance)})</td></tr>
+            <tr><th style={th}>Block Chance</th><td style={td}>{fmt0(blockCount)} ({fmtPct1(blockChance)})</td></tr>
+            <tr><th style={th}>Total Blocked Amount</th><td style={td}>{fmt0(totalBlocked)}</td></tr>
+            <tr><th style={th}>Average Blocked Amount</th><td style={td}>{fmt0(avgBlocked)}</td></tr>
+            <tr><th style={th}>Average Armor Mitigation</th><td style={td}>{fmtPct1(avgArmorMitigation)}</td></tr>
+
+            {attackers.length > 0 && (
+              <tr>
+                <th style={{...th, verticalAlign:'top'}}>Top Attackers</th>
+                <td style={{...td, textAlign:'left'}}>
+                  {attackers.map(([name, dmg]) => (
+                    <div key={name} style={{ display:'flex', justifyContent:'space-between', gap:8 }}>
+                      <span style={{ opacity:0.85 }}>{name}</span>
+                      <span style={{ fontVariantNumeric:'tabular-nums' }}>{fmt0(dmg)}</span>
+                    </div>
+                  ))}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }

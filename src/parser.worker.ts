@@ -36,6 +36,10 @@ const RX_DMG_DOT    = /^(.+?)\s+suffers\s+(\d+)\s+points\s+of\s+damage\s+from\s+
 const RX_DMG_CAUSED = /^(.+?)\s+(?:has\s+)?caused\s+(.+?)\s+to\s+take\s+(\d+)\s+points\s+(?:of\s+([A-Za-z '\-]+?)\s+)?damage\b.*$/i;
 
 // ---------- Defensive outcomes (expanded coverage) ----------
+// "...attacks ... [with|using ...] and misses (dodge|parry)."
+const RX_MISSES_PAREN =
+  /^(.+?)\s+attacks\s+(.+?)(?:\s+(?:with|using)\s+.+?)?\s+(?:and\s+)?misses\s*\((dodge|parry|parries)\)\.?$/i;
+
 // "Amero attacks Beefy using X but/and Beefy dodges/parries"
 const RX_DODGE_PARRY_1 = /^(.+?)\s+attacks\s+(.+?)\s+(?:with|using)\s+.*?(?:,?\s+)?(?:but|and)\s+\2\s+(dodges|parries)\b/i;
 // "Amero attacks Beefy but/and Beefy dodges/parries"
@@ -228,7 +232,18 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       return { src, dst };
     };
 
-    // ---------- Defensive outcomes ----------
+    // ---------- Defensive outcomes: "misses (dodge|parry)" ----------
+    if ((m = RX_MISSES_PAREN.exec(rest))) {
+      const { src, dst } = normNames(m[1], m[2]);
+      const kind = (m[3] || '').toLowerCase();
+      if (src) {
+        const flag = kind.startsWith('dodg') ? 'dodge' : 'parry';
+        pushOutcome(t, src, dst, flag as 'dodge' | 'parry');
+        parsed++; continue;
+      }
+    }
+
+    // ---------- Defensive outcomes (other phrasings) ----------
     if ((m = RX_DODGE_PARRY_1.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);
       const flag = (m[3]||'').toLowerCase() as 'dodges'|'parries';
@@ -252,14 +267,13 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       if (src && dst) { pushOutcome(t, src, dst, flagPast === 'dodged' ? 'dodge' : 'parry'); parsed++; continue; }
     }
 
-// Helpers for block/absorb on damage lines
-const blockedMatch = rest.match(RX_POINTS_BLOCKED);
-const blockedAmt = blockedMatch ? +blockedMatch[1] : undefined;
+    // Helpers for block/absorb on damage lines
+    const blockedMatch = rest.match(RX_POINTS_BLOCKED);
+    const blockedAmt = blockedMatch ? +blockedMatch[1] : undefined;
 
-const absorbMatch = rest.match(RX_ARMOR_ABSORB);   // <-- add this
-const absorbedAmt = absorbMatch ? +absorbMatch[1] : undefined;
-const preMitTotal = absorbMatch ? +absorbMatch[2] : undefined;
-
+    const absorbMatch = rest.match(RX_ARMOR_ABSORB);
+    const absorbedAmt = absorbMatch ? +absorbMatch[1] : undefined;
+    const preMitTotal = absorbMatch ? +absorbMatch[2] : undefined;
 
     // ---------- Damage parsing ----------
     if ((m = RX_DMG_WITH.exec(rest))){

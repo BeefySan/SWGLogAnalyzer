@@ -594,8 +594,54 @@ export default function App(){
     return out;
   }
 
+  // A/B overlays (kept)
   const aSeries = useMemo(()=> smooth ? smoothSeries(seriesFor(pA), 7) : seriesFor(pA), [pA, perSrc, timeline, smooth]);
   const bSeries = useMemo(()=> smooth ? smoothSeries(seriesFor(pB), 7) : seriesFor(pB), [pB, perSrc, timeline, smooth]);
+
+  // NEW: Top 10 lines (by total damage in current window)
+  const top10Names = useMemo(
+    () => [...rows].sort((a,b)=> b.damageDealt - a.damageDealt).slice(0,10).map(r=> r.name),
+    [rows]
+  );
+  const top10Series = useMemo(
+    () => top10Names.map(name => ({
+      name,
+      series: smooth ? smoothSeries(seriesFor(name), 7) : seriesFor(name),
+      color: classColor(inferredClasses[name]),
+    })),
+    [top10Names, smooth, perSrc, timeline, inferredClasses]
+  );
+
+  // Should we dim non-selected lines? Only if A or B is selected AND present in Top-10.
+  const hasSelection = useMemo(
+    () =>
+      compareOn &&
+      ((pA && top10Names.includes(pA)) || (pB && top10Names.includes(pB))),
+    [compareOn, pA, pB, top10Names]
+  );
+
+  // Build a combined dataset: one row per second with a column per Top-10 player
+  const top10Data = useMemo(() => {
+    if (!timeline.length || !top10Series.length) return [];
+    const len = top10Series[0].series.length;
+    return Array.from({ length: len }, (_, i) => {
+      const t = top10Series[0].series[i]?.t ?? (timeline[0]?.t ?? 0) + i;
+      const row: any = { t };
+      top10Series.forEach(({ name, series }) => {
+        row[name] = series[i]?.v || 0;
+      });
+      return row;
+    });
+  }, [timeline, top10Series]);
+
+  // Y-axis max across Top-10 and A/B overlays
+  const maxY = useMemo(() => {
+    let m = 0;
+    top10Series.forEach(({ series }) => series.forEach(p => { if (p.v > m) m = p.v; }));
+    aSeries.forEach(p => { if ((p?.v || 0) > m) m = p.v; });
+    bSeries.forEach(p => { if ((p?.v || 0) > m) m = p.v; });
+    return m || 1;
+  }, [top10Series, aSeries, bSeries]);
 
   function pickFromChart(name:string, ev?:any){
     if(!compareOn) return;
@@ -653,7 +699,7 @@ export default function App(){
       {/* Timeline + segments UI */}
       <div className="card">
         <div style={{ padding:'12px 14px', borderBottom:'1px solid #1b2738', display:'flex', justifyContent:'space-between', alignItems:'center', gap:12 }}>
-          <div style={{ fontSize:13, fontWeight:800, color:'#9fb7d8', letterSpacing:.3 }}>DPS/HPS Over Time</div>
+          <div style={{ fontSize:13, fontWeight:800, color:'#9fb7d8', letterSpacing:.3 }}>DPS Over Time - Top 10</div>
           <div className="row" style={{gap:8}}>
             <label className="row" style={{gap:6}}><input type="checkbox" checked={smooth} onChange={e=>setSmooth(e.target.checked)} /><span className="pill">Smooth</span></label>
             <label className="row" style={{gap:6}}>
@@ -674,31 +720,72 @@ export default function App(){
         </div>
         <div style={{ padding:0, height:420 }}>
           <ResponsiveContainer>
-            <AreaChart data={timeline.map(d=>({ t:d.t, dps:d.dps, hps:d.hps }))} margin={{ top: 8, right: 20, left: 0, bottom: 0 }}>
-              <defs>
-                <linearGradient id="dpsFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#6ec7ff" stopOpacity={0.35}/>
-                  <stop offset="100%" stopColor="#6ec7ff" stopOpacity={0.02}/>
-                </linearGradient>
-                <linearGradient id="hpsFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#8dd17e" stopOpacity={0.30}/>
-                  <stop offset="100%" stopColor="#8dd17e" stopOpacity={0.02}/>
-                </linearGradient>
-              </defs>
+            <LineChart data={top10Data} margin={{ top: 8, right: 20, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="#1c2a3f" strokeDasharray="2 4" />
-              <XAxis dataKey="t" tickFormatter={(s)=>toMMSS(Number(s))} stroke="#8aa8cf" />
-              <YAxis tickFormatter={(s)=>fmt0(s)} stroke="#8aa8cf" />
+              <XAxis
+                dataKey="t"
+                type="number"
+                domain={['dataMin','dataMax']}
+                tickFormatter={(s)=>toMMSS(Number(s))}
+                stroke="#8aa8cf"
+              />
+              <YAxis
+                tickFormatter={(s)=>fmt0(s)}
+                stroke="#8aa8cf"
+                domain={[0, maxY * 1.05]}
+              />
               <Tooltip formatter={(v:number)=>fmt0(v)} labelFormatter={(l)=>toMMSS(Number(l))} />
               <Legend />
-              <Area type="monotone" dataKey="dps" name="DPS (All)" stroke="#6ec7ff" strokeWidth={2} fill="url(#dpsFill)" />
-              <Area type="monotone" dataKey="hps" name="HPS (All)" stroke="#8dd17e" strokeWidth={2} fill="url(#hpsFill)" />
+
+              {/* Top-10 per-player lines */}
+              {top10Series.map(({ name, color }) => {
+                const selected = (name === pA || name === pB);
+                const opacity = hasSelection ? (selected ? 1 : 0.4) : 1;
+
+                return (
+                  <Line
+                    key={name}
+                    type="monotone"
+                    dataKey={name}
+                    name={name}
+                    stroke={color}
+                    strokeWidth={2}
+                    strokeOpacity={opacity}  // dim non-selected
+                    dot={false}
+                    isAnimationActive={false}
+                  >
+                    {/* label at the last point only */}
+                    <LabelList
+                      dataKey={name}
+                      content={(props:any) => {
+                        const { x, y, index, value } = props;
+                        if (index !== top10Data.length - 1 || (value ?? 0) <= 0) return null;
+                        return (
+                          <text
+                            x={x + 6}
+                            y={y - 6}
+                            fontSize={11}
+                            fill={color}
+                            fillOpacity={opacity}  // dim label to match line
+                            style={{ pointerEvents:'none' }}
+                          >
+                            {name}
+                          </text>
+                        );
+                      }}
+                    />
+                  </Line>
+                );
+              })}
+
+              {/* A/B overlays */}
               {compareOn && pA && (
-                <Line type="monotone" dataKey="v" name={`A: ${pA}`} data={aSeries} stroke="#ffd166" strokeWidth={2.5} dot={false} />
+                <Line type="monotone" data={aSeries} dataKey="v" name={`A: ${pA}`} stroke="#ffd166" strokeWidth={2.5} dot={false} isAnimationActive={false} />
               )}
               {compareOn && pB && (
-                <Line type="monotone" dataKey="v" name={`B: ${pB}`} data={bSeries} stroke="#ef476f" strokeWidth={2.5} dot={false} />
+                <Line type="monotone" data={bSeries} dataKey="v" name={`B: ${pB}`} stroke="#ef476f" strokeWidth={2.5} dot={false} isAnimationActive={false} />
               )}
-            </AreaChart>
+            </LineChart>
           </ResponsiveContainer>
         </div>
       </div>

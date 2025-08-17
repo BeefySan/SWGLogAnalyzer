@@ -7,6 +7,7 @@ type DamageEvent = {
   dst:string;
   ability:string;
   amount:number;
+  elements?: Record<string, number>;
   flags?:string;         // 'hit' | 'crit' | 'glance' | 'strikethrough' | 'periodic' | 'dodge' | 'parry'
   blocked?: number;
   absorbed?: number;
@@ -61,6 +62,52 @@ const RX_HEAL = /^(.+?)\s+heals\s+(.+?)\s+for\s+(\d+)\s+points(?:\s+with\s+(.+))
 const RX_POINTS_BLOCKED = /\((\d+)\s+points\s+blocked\)/i;
 const RX_ARMOR_ABSORB   = /Armor\s+absorbed\s+(\d+)\s+points\s+out\s+of\s+(\d+)/i;
 const RX_EVADED_PCT     = /\((\d+)\s*%(?:\s*evaded)?\)/i;
+
+
+// ---------- Elemental parsing helpers ----------
+const ELEMENT_ALIASES: Record<string,string> = {
+  kinetic: 'kinetic', kin:'kinetic',
+  energy:'energy',
+  heat:'heat',
+  cold:'cold',
+  acid:'acid',
+  electricity:'electricity', electric:'electricity',
+  poison:'poison'
+};
+
+function parseElementTupleList(s: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  // split on comma or "and"
+  const parts = s.split(/\s*(?:,|and)\s*/i).filter(Boolean);
+  for (const part of parts) {
+    const m = part.match(/(\d+)\s*([a-z]+)/i);
+    if (!m) continue;
+    const n = +m[1];
+    const raw = m[2].toLowerCase();
+    const key = ELEMENT_ALIASES[raw] ?? raw;
+    out[key] = (out[key] || 0) + n;
+  }
+  return out;
+}
+
+// Try to extract per-hit elemental split from a line body (no timestamp)
+function extractElementsFromRest(rest: string): Record<string, number> | undefined {
+  // pattern: "... for N points (689 energy and 156 cold)"
+  const mParen = rest.match(/for\s+\d+\s+points\s*\(([^)]+)\)/i);
+  if (mParen && mParen[1] && !/\bpoints\s+blocked\b/i.test(mParen[1])) {
+    const parsed = parseElementTupleList(mParen[1]);
+    const keys = Object.keys(parsed);
+    if (keys.length) return parsed;
+  }
+  // pattern: "... for 1200 energy."
+  const mSingle = rest.match(/for\s+(\d+)\s+(kinetic|energy|heat|cold|acid|electricity|electric|poison)\b/i);
+  if (mSingle) {
+    const amt = +mSingle[1];
+    const key = (ELEMENT_ALIASES[mSingle[2].toLowerCase()] ?? mSingle[2].toLowerCase());
+    return { [key]: amt };
+  }
+  return undefined;
+}
 
 // ---------- Normalizers ----------
 function clean(s?:string){ return (s||'').trim(); }
@@ -180,6 +227,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
     dst:string,
     abilityRaw:string,
     amount:number,
+    elements?: Record<string, number>,
     flags?:string,
     blocked?:number,
     absorbed?:number,
@@ -192,6 +240,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       t, src, dst,
       ability: abilityRaw || abilityKey || 'attack',
       amount, flags,
+      elements,
       blocked, absorbed, preMitTotal,
       evadedPct
     });
@@ -335,7 +384,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
         kindRaw.startsWith('strikes through') ? 'strikethrough' : undefined;
 
       if (src){
-        pushDamage(t, src, dst, ability, amount, flag, blockedAmt, absorbedAmt, preMitTotal, evadedPct);
+        pushDamage(t, src, dst, ability, amount, extractElementsFromRest(rest), flag, blockedAmt, absorbedAmt, preMitTotal, evadedPct);
         parsed++; continue;
       }
     }
@@ -353,7 +402,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
         kindRaw.startsWith('strikes through') ? 'strikethrough' : undefined;
 
       if (src){
-        pushDamage(t, src, dst, 'attack', amount, flag, blockedAmt, absorbedAmt, preMitTotal, evadedPct);
+        pushDamage(t, src, dst, 'attack', amount, extractElementsFromRest(rest), flag, blockedAmt, absorbedAmt, preMitTotal, evadedPct);
         parsed++; continue;
       }
     }
@@ -363,7 +412,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       const amount = +m[3];
       const ability = clean(m[4]||'attack');
       if (src){
-        pushDamage(t, src, dst, ability, amount, undefined, blockedAmt, absorbedAmt, preMitTotal, evadedFromScan);
+        pushDamage(t, src, dst, ability, amount, extractElementsFromRest(rest), undefined, blockedAmt, absorbedAmt, preMitTotal, evadedFromScan);
         parsed++; continue;
       }
     }
@@ -377,7 +426,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       const abilityRaw = clean(m[3]);
       const key = normalizeAbilityName(abilityRaw);
       const caster = lastCasterForDot[`${key}||${dstNormOnly}`] || '';
-      pushDamage(t, caster || key || 'Periodic', dstNormOnly, abilityRaw, amount, 'periodic');
+      pushDamage(t, caster || key || 'Periodic', dstNormOnly, abilityRaw, amount, undefined, 'periodic');
       parsed++; continue;
     }
 
@@ -385,7 +434,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       const { src, dst } = normNames(m[1], m[2]);
       const amount = +m[3];
       const dtype = clean(m[4] || 'Periodic');
-      if (src){ pushDamage(t, src, dst, dtype, amount, 'periodic'); parsed++; continue; }
+      if (src){ pushDamage(t, src, dst, dtype, amount, undefined, 'periodic'); parsed++; continue; }
     }
 
     // Healing

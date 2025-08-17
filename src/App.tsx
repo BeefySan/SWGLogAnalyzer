@@ -1,13 +1,40 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback, useTransition, useDeferredValue } from "react";
 import ErrorBoundary from "./ErrorBoundary";
-import {
-  ResponsiveContainer,
-  AreaChart, Area, LineChart, Line,
-  CartesianGrid, XAxis, YAxis,
-  Tooltip, Legend,          // <- Recharts Tooltip
-  BarChart, Bar, LabelList, Cell,
-  Sankey,                   // <- Recharts Sankey
-} from "recharts";
+import { ResponsiveContainer, AreaChart, Area, LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip, Legend, BarChart, Bar, LabelList, Cell, Sankey, ReferenceLine, ReferenceArea } from "recharts";
+
+// --- Bigger, centered label for death-flag ReferenceLines ---
+type DeathLabelProps = {
+  value: string;
+  size?: number;           // font size
+  dy?: number;             // vertical offset from the edge
+  anchor?: 'top' | 'bottom';
+  // recharts injects this when label is a React element:
+  viewBox?: { x: number; y: number; width: number; height: number };
+};
+
+const DeathLabel: React.FC<DeathLabelProps> = ({
+  value, size = 16, dy = 14, anchor = 'top', viewBox
+}) => {
+  const x = viewBox?.x ?? 0;
+  const y = anchor === 'top'
+    ? (viewBox?.y ?? 0) + dy
+    : (viewBox?.y ?? 0) + (viewBox?.height ?? 0) - dy;
+
+  const skullSize = Math.round(size * 0.9);
+  const textSize  = size;
+
+  return (
+    <g pointerEvents="none">
+      <text x={x + 2}  y={y} textAnchor="middle" fontSize={skullSize} fill="#ff6464">☠</text>
+      <text x={x + skullSize + 6} y={y} textAnchor="start" dominantBaseline="middle"
+            fontSize={textSize} fontWeight={700} fill="#ffdada"
+            stroke="#0b1526" strokeWidth={3} style={{ paintOrder:'stroke' }}>
+        {value}
+      </text>
+    </g>
+  );
+};
+
 
 
 // --- Star Wars skin as CSS string ---
@@ -50,8 +77,8 @@ const SW_CSS = /* css */ `
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
-  opacity: .9;           /* 90% opacity */
-  z-index: -1;           /* behind content but above page bg */
+  opacity: .9;
+  z-index: -1;
   pointer-events: none;
 }
 
@@ -108,13 +135,49 @@ const SW_CSS = /* css */ `
 }
 .swg-theme .tab.active{ border-color:var(--accent); box-shadow: 0 0 0 1px rgba(0,0,0,.35) inset, 0 0 18px rgba(33,212,253,.25); color:#eaf6ff; }
 
+/* ---------- TABLES (Abilities, etc.) ---------- */
 .swg-theme .table{ width:100%; border-collapse:collapse; }
+
+/* Bigger headers & slightly bigger body text */
 .swg-theme .table th{
-  text-align:left; font-weight:800; font-size:12px; letter-spacing:.06em; color:#9fb7d8;
-  border-bottom:1px solid var(--panel-border); padding:8px; text-transform:uppercase;
+  text-align:left;
+  font-weight:800;
+  font-size:16px;                 /* was 12px */
+  letter-spacing:.06em;
+  color:#9fb7d8;
+  border-bottom:1px solid var(--panel-border);
+  padding:10px 12px;              /* a bit more breathing room */
+  text-transform:uppercase;
 }
-.swg-theme .table td{ padding:8px; border-bottom:1px solid rgba(27,39,56,.6); }
+.swg-theme .table td{
+  padding:9px 12px;
+  font-size:14px;                 /* slightly larger cells */
+  border-bottom:1px solid rgba(27,39,56,.6);
+}
+
+/* Clear light separators between columns */
+.swg-theme .table th + th,
+.swg-theme .table td + td {
+  border-left: 1px solid rgba(120,170,255,.28);  /* brighter than .18 */
+}
+.swg-theme .table th:first-child,
+.swg-theme .table td:first-child { border-left: none; }
+
+/* Center everything except the first column (Ability) */
+.swg-theme .table th:not(:first-child),
+.swg-theme .table td:not(:first-child) {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Keep Ability column readable left-aligned */
+.swg-theme .table th:first-child,
+.swg-theme .table td:first-child { text-align: left; }
+
 .swg-theme .table tr:hover td{ background: rgba(98,176,255,.06); }
+
+/* Optional helper if you want to opt-in per cell: */
+.swg-theme .num { text-align:center !important; font-variant-numeric: tabular-nums; }
 
 .swg-theme .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
 .swg-theme .nowrap{ white-space: nowrap; }
@@ -130,10 +193,10 @@ const SW_CSS = /* css */ `
   box-shadow: 0 12px 28px rgba(0,0,0,.6), 0 0 0 2px rgba(98,176,255,.12) inset;
   padding: 8px 10px !important;
 }
-.swg-theme .recharts-tooltip-label { 
-  color: #eaf3ff !important; 
-  font-weight: 800; 
-  letter-spacing: .02em; 
+.swg-theme .recharts-tooltip-label {
+  color: #eaf3ff !important;
+  font-weight: 800;
+  letter-spacing: .02em;
 }
 .swg-theme .recharts-tooltip-item { color: var(--text) !important; }
 .swg-theme .recharts-tooltip-item-name { color: var(--muted) !important; }
@@ -180,13 +243,37 @@ function collectAbilityElements(
 
 function summarizeElements(totals: ElementalBreakdown): { types: string; pct: string } {
   const entries = Object.entries(totals || {});
-  const total = entries.reduce((s, [,v]) => s + Number(v || 0), 0);
+  const total = entries.reduce((s, [, v]) => s + Number(v || 0), 0);
   if (!total) return { types: "—", pct: "—" };
-  entries.sort((a,b) => Number(b[1]) - Number(a[1]));
+  entries.sort((a, b) => Number(b[1]) - Number(a[1]));
   const types = entries.map(([k]) => titleCase(k)).join(", ");
-  const pct = entries.map(([k,v]) => `${fmtPctElem(Number(v)/total)} ${titleCase(k)}`).join(", ");
+  const pct = entries.map(([k, v]) => `${fmtPctElem(Number(v) / total)} ${titleCase(k)}`).join(", ");
   return { types, pct };
 }
+
+// ✅ new code goes *after* summarizeElements is fully closed above
+
+// Ability → elemental hints (extend as you like). Keys must be normalized ability names.
+const ABILITY_ELEMENT_HINTS: Record<string, ElementalBreakdown> = {
+  // Examples — tweak to match your game:
+  "plasma mine": { fire: 1 },
+  "focused beam": { energy: 1 },
+  "force lightning": { electricity: 1 },
+  "force shockwave": { kinetic: 1 },
+  "maelstrom": { electricity: 1 },
+};
+
+// Turn a hint into a totals object using the ability’s total damage
+function hintedElementsForAbility(abilityNorm: string, totalDamage: number): ElementalBreakdown {
+  const hint = ABILITY_ELEMENT_HINTS[abilityNorm];
+  if (!hint) return {};
+  const out: ElementalBreakdown = {};
+  for (const [k, ratio] of Object.entries(hint)) {
+    out[k] = totalDamage * Number(ratio || 0);
+  }
+  return out;
+}
+
 
 
 /* ========================= Utilities & Types ========================= */
@@ -226,7 +313,13 @@ const cleanName = (s?: string) =>
   norm(s).replace(/^(a|b)\s*:\s*/, "").replace(/^player\s*(a|b)\s*:\s*/, "");
 
 const flagOf = (e: DFEvent) => (e.flags ?? "").toString().toLowerCase();
-const isPeriodic = (e: DFEvent) => flagOf(e).includes("periodic");
+const PERIODIC_TOKENS = ['periodic','dot','damage over time','bleed','burn','poison'];
+const isPeriodic = (e: DFEvent) => {
+  const f = flagOf(e);
+  if (f.includes('periodic')) return true;
+  const abil = (e.ability || '').toLowerCase();
+  return PERIODIC_TOKENS.some(tok => abil.includes(tok));
+};
 
 // destination with fallbacks (dst/target/victim/defender)
 const getDst = (e: DFEvent) =>
@@ -502,11 +595,16 @@ export default function App(){
   const [basePerTakenBy, setBasePerTakenBy] = useState<Record<string, Record<string, number>>>({});
   const [damageEvents, setDamageEvents] = useState<DamageEvent[]>([]);
   const [healEvents, setHealEvents] = useState<HealEvent[]>([]);
+  const [deathEvents, setDeathEvents] = useState<Array<{t:number; name:string}>>([]);
   const [duration, setDuration] = useState<number>(0);
   const [debug, setDebug] = useState<any>(null);
 
   // filtered (by segment) derived state
   const [rows, setRows] = useState<PlayerRow[]>([]);
+
+  // smooth heavy updates & defer list derivations
+  const [isPending, startTransition] = useTransition();
+  const rowsDeferred = useDeferredValue(rows);
   const [timeline, setTimeline] = useState<Array<{t:number; dps:number; hps:number}>>([]);
   const [perSrc, setPerSrc] = useState<Record<string, number[]>>({});
   const [perAbility, setPerAbility] = useState<PerAbility>({});
@@ -530,28 +628,103 @@ export default function App(){
   const [segments, setSegments] = useState<Array<{start:number; end:number; label:string}>>([]);
   const [segIndex, setSegIndex] = useState<number>(-1);
 
+const resetWindow = useCallback(() => {
+  if (segIndex >= 0 && segments[segIndex]) {
+    const { start, end } = segments[segIndex];
+    applyWindow({ start, end }, {
+      tl: baseTimeline, rows: baseRows, perSrc: basePerSrc,
+      perAbility: basePerAbility, pat: basePerAbilityTargets,
+      perTaken: basePerTaken, perTakenBy: basePerTakenBy, duration
+    });
+    return;
+  }
+  const start = baseTimeline?.[0]?.t ?? 0;
+  const end   = baseTimeline?.length ? baseTimeline[baseTimeline.length - 1].t : duration;
+  applyWindow({ start, end }, {
+    tl: baseTimeline, rows: baseRows, perSrc: basePerSrc,
+    perAbility: basePerAbility, pat: basePerAbilityTargets,
+    perTaken: basePerTaken, perTakenBy: basePerTakenBy, duration
+  });
+}, [
+  segIndex, segments,
+  baseTimeline, baseRows, basePerSrc, basePerAbility, basePerAbilityTargets,
+  basePerTaken, basePerTakenBy, duration, applyWindow
+]);
+// --- Zoom / window selection ---
+  const [selecting, setSelecting] = useState<{x0:number, x1:number} | null>(null);
+  const [hoverX, setHoverX] = useState<number | null>(null);
+
+  const clampToActive = useCallback((start:number, end:number)=>{
+    if (segIndex >= 0 && segments[segIndex]) {
+      const seg = segments[segIndex];
+      const s = Math.max(seg.start, Math.min(start, end));
+      const e = Math.min(seg.end,   Math.max(start, end));
+      return { start: Math.min(s,e), end: Math.max(s,e) };
+    }
+    return { start: Math.min(start,end), end: Math.max(start,end) };
+  }, [segIndex, segments]);
+
+  const commitWindow = useCallback((s:number, e:number)=>{
+    const { start, end } = clampToActive(s, e);
+    applyWindow({ start, end }, {
+      tl: baseTimeline, rows: baseRows, perSrc: basePerSrc,
+      perAbility: basePerAbility, pat: basePerAbilityTargets,
+      perTaken: basePerTaken, perTakenBy: basePerTakenBy, duration
+    });
+  }, [clampToActive, baseTimeline, baseRows, basePerSrc, basePerAbility, basePerAbilityTargets, basePerTaken, basePerTakenBy, duration]);
+
   // ability expand
   const [openAbility, setOpenAbility] = useState<string>('');
 
+
   /* -------------------- worker / parsing -------------------- */
-  function ensureWorker(){
+  
+async function ensureWorker(): Promise<Worker>{
     if (workerRef.current) return workerRef.current;
-    const w = new Worker(new URL('./parser.worker.ts', import.meta.url), { type:'module' });
-    w.onmessage = (ev:any)=>{
+
+    let w: Worker | null = null;
+
+    // Try native new URL pattern first
+    try {
+      w = new Worker(new URL('./parser.worker.ts', import.meta.url), { type: 'module' });
+    } catch (e) {
+      // Fallback for some Vite setups: ?worker import
+      try {
+        const mod: any = await import('./parser.worker.ts?worker');
+        const WorkerCtor = mod?.default;
+        if (WorkerCtor) {
+          w = new WorkerCtor();
+        }
+      } catch (e2) {
+        console.error('Failed to construct worker via ?worker import:', e2);
+      }
+    }
+
+    if (!w) {
+      throw new Error('Failed to create parser worker');
+    }
+
+    
+    // Debug: confirm worker constructed
+    try { console.debug('[parser worker] constructed'); } catch {}
+w.onmessage = (ev:any)=>{
+      try { console.debug('[parser worker] message', ev?.data); } catch {}
       const msg = ev.data;
-      if (msg.type==='progress'){ setParsing({done:msg.done,total:msg.total}); return; }
-      if (msg.type==='done'){
+      if (msg?.type === 'progress'){
+        setParsing({done:msg.done,total:msg.total});
+        return;
+      }
+      if (msg?.type === 'done'){
+      startTransition(() => {
         const {
           rows:rws, tl, perSrc, perAbility, perAbilityTargets:pat,
           perTaken, perTakenBy, debug, duration,
-          damageEvents, healEvents
+          damageEvents, healEvents, deathEvents
         } = msg.payload;
 
-        // normalize & merge ability names in BASE aggregates
         const { pa: basePaNorm, pat: basePatNorm } =
           mergeNormalizedAbilities(perAbility || {}, pat || {});
 
-        // save bases
         setBaseRows(rws); setBaseTimeline(tl);
         setBasePerSrc(perSrc||{});
         setBasePerAbility(basePaNorm);
@@ -560,39 +733,70 @@ export default function App(){
         setBasePerTakenBy(perTakenBy||{});
         setDamageEvents(damageEvents||[]);
         setHealEvents(healEvents||[]);
+        setDeathEvents(deathEvents||[]);
         setDuration(duration||0);
         setDebug(debug);
 
-        // compute segments off raw events
         const segs = deriveSegments(tl, damageEvents||[], idleGap);
         setSegments(segs);
-        setSegIndex(-1); // none
+        setSegIndex(-1);
 
-        // seed filtered views for full range via applyWindow (so canonicalization applies)
         const start = tl?.[0]?.t ?? 0;
         const end   = tl?.length ? tl[tl.length-1].t : duration;
         applyWindow({ start, end }, {
           tl, rows:rws, perSrc, perAbility: basePaNorm, pat: basePatNorm, perTaken, perTakenBy, duration
         });
 
-        // keep A/B still valid
         setPA(a=> rws.find(v=>v.name===a)?.name || '');
         setPB(b=> rws.find(v=>v.name===b)?.name || '');
 
         setParsing(null);
-      }
-    }
-    workerRef.current = w; return w;
+      
+      });
+}
+    };
+    w.onerror = (err) => {
+      console.error('Parser worker error:', err);
+    };
+    (w as any).onmessageerror = (err: any) => {
+      console.error('Parser worker messageerror:', err);
+    };
+
+    workerRef.current = w;
+    return w;
   }
-  function parseTextViaWorker(text:string){
-    const w = ensureWorker();
+
+  async function parseTextViaWorker(text:string){
+    const w = await ensureWorker();
     setParsing({done:0,total:1});
-    w.postMessage({ text, collectUnparsed });
+    try {
+      // Send both legacy and typed shapes so either worker impl will parse it
+      w.postMessage({ text, collectUnparsed });
+      w.postMessage({ type: 'parse', text, collectUnparsed });
+    } catch (e) {
+      console.error('Failed to postMessage to worker:', e);
+      setParsing(null);
+      return;
+    }
+    // Watchdog: if we don't get progress/done soon, clear spinner and surface hint
+    setTimeout(() => {
+      setParsing(prev => {
+        if (prev && prev.done === 0 && prev.total === 1) {
+          console.error('[parser worker] no response after 6s — check worker import path or message shape');
+          return null;
+        }
+        return prev;
+      });
+    }, 6000);
   }
+
   function onChoose(files: FileList | null){
     if(!files || !files.length) return;
-    const fr = new FileReader(); fr.onload = () => parseTextViaWorker(String(fr.result||'')); fr.readAsText(files[0]);
+    const fr = new FileReader();
+    fr.onload = () => { parseTextViaWorker(String(fr.result||'')); };
+    fr.readAsText(files[0]);
   }
+  
 
   /* -------------------- segmentation & filtering -------------------- */
 
@@ -640,6 +844,7 @@ export default function App(){
     tl: any[], rows:PlayerRow[], perSrc:Record<string,number[]>, perAbility:PerAbility, pat: PerAbilityTargets,
     perTaken:Record<string,number>, perTakenBy:Record<string,Record<string,number>>, duration:number
   }){
+  startTransition(() => {
     if (!window){
       setRows(base.rows);
       setTimeline(base.tl);
@@ -698,7 +903,8 @@ export default function App(){
     for (const e of dE){
       const actor = canonEntity(e.src);
       const target = canonEntity(e.dst);
-      const abil = normalizeAbilityName(e.ability);
+      let abil = normalizeAbilityName(e.ability);
+// Keep aggregation key normalized without suffix; label in UI instead.
 
       if (!pa[actor]) pa[actor] = {};
       if (!pa[actor][abil]) pa[actor][abil] = { hits:0, dmg:0, max:0 };
@@ -725,7 +931,9 @@ export default function App(){
     }
     setPerTaken(takenTotal);
     setPerTakenBy(takenBy);
-  }
+  
+  });
+}
 
   // recompute segments when idle gap changes or new data arrives
   useEffect(()=>{
@@ -760,7 +968,11 @@ export default function App(){
     }
   }, [segIndex, baseTimeline, baseRows, basePerSrc, basePerAbility, basePerAbilityTargets, basePerTaken, basePerTakenBy, segments, duration]);
 
-  /* -------------------- selectors & memo -------------------- */
+  
+  /* -------------------- derived window bounds (for overlays) -------------------- */
+  const windowStart = useMemo(() => (timeline[0]?.t ?? (baseTimeline[0]?.t ?? 0)), [timeline, baseTimeline]);
+  const windowEnd   = useMemo(() => (timeline.length ? timeline[timeline.length-1].t : (baseTimeline.length ? baseTimeline[baseTimeline.length-1].t : duration)), [timeline, baseTimeline, duration]);
+/* -------------------- selectors & memo -------------------- */
 
   // Alphabetize and de-duplicate the comparison dropdown
   const names = useMemo(()=>{
@@ -818,6 +1030,14 @@ export default function App(){
     })),
     [top10Names, smooth, perSrc, timeline, inferredClasses]
   );
+const deathFlags = useMemo(() => {
+  if (!deathEvents?.length || !top10Series?.length) return [];
+  const allow = new Set(top10Series.map(s => s.name));
+  return deathEvents
+    .filter(d => d.t >= windowStart && d.t <= windowEnd && allow.has(d.name))
+    .sort((a, b) => a.t - b.t);
+}, [deathEvents, top10Series, windowStart, windowEnd]);
+
 
   // Should we dim non-selected lines? Only if A or B is selected AND present in Top-10.
   const hasSelection = useMemo(
@@ -907,9 +1127,9 @@ export default function App(){
 
       {/* Timeline + segments UI */}
       <div className="card">
-        <div style={{ padding:'12px 14px', borderBottom:'1px solid #1b2738', display:'flex', justifyContent:'space-between', alignItems:'center', gap:12 }}>
-          <div style={{ fontSize:13, fontWeight:800, color:'#9fb7d8', letterSpacing:.3 }}>DPS Over Time - Top 10</div>
-          <div className="row" style={{gap:8}}>
+        <div style={{ padding:'12px 14px', borderBottom:'1px solid #1b2738', display:'flex', flexDirection:'column', alignItems:'center', gap:10 }}>
+          <div style={{ alignSelf:'flex-start' }}><div style={{ fontSize:13, fontWeight:800, color:'#9fb7d8', letterSpacing:.3 }}>DPS Over Time - Top 10</div></div>
+          <div className="row" style={{gap:8, alignItems:'center', justifyContent:'center', flexWrap:'wrap', width:'100%', marginTop:6}}>
             <label className="row" style={{gap:6}}><input type="checkbox" checked={smooth} onChange={e=>setSmooth(e.target.checked)} /><span className="pill">Smooth</span></label>
             <label className="row" style={{gap:6}}>
               <span className="pill">Idle gap (s)</span>
@@ -922,14 +1142,19 @@ export default function App(){
                 {segments.map((s, i)=>(<option key={i} value={i}>{s.label}</option>))}
               </select>
             </label>
-            <div style={{ fontSize:12, color:'#9bb7df' }}>
-              Parsed {fmt0(debug?.parsed)}/{fmt0(debug?.totalLines)} • Duration {toMMSS(debug?.duration||0)}
-            </div>
-          </div>
+<div style={{ display:'flex', gap:12, alignItems:'center' }}>
+  <div style={{ fontSize:12, color:'#9bb7df' }}>
+    Parsed {fmt0(debug?.parsed)}/{fmt0(debug?.totalLines)} • Duration {toMMSS(debug?.duration||0)}
+  </div>
+  <button className="btn" style={{ marginLeft: 8 }} onClick={resetWindow}>
+    RESET WINDOW
+  </button>
+</div>
         </div>
-        <div style={{ padding:0, height:420 }}>
-          <ResponsiveContainer>
-            <LineChart data={top10Data} margin={{ top: 8, right: 20, left: 0, bottom: 0 }}>
+
+        <div style={{ padding:0, height:420, width:'100%' }}>
+          <ResponsiveContainer width="100%" height="100%" debounce={200}>
+            <LineChart onMouseDown={(e:any)=>{ if(!e||e.activeLabel==null)return; setSelecting({x0:Number(e.activeLabel),x1:Number(e.activeLabel)}); }} onMouseMove={(e:any)=>{ if(e&&e.activeLabel!=null) setHoverX(Number(e.activeLabel)); if(!selecting||!e||e.activeLabel==null) return; setSelecting(s=>s?({...s,x1:Number(e.activeLabel)}):s); }} onMouseUp={(e:any)=>{ if(!selecting) return; const {x0,x1}=selecting; setSelecting(null); if(Math.abs(x1-x0)>=1) commitWindow(x0,x1); }} onMouseLeave={()=> setHoverX(null)} onDoubleClick={()=> resetWindow()} data={top10Data} margin={{ top: 8, right: 20, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="#1c2a3f" strokeDasharray="2 4" />
               <XAxis
                 dataKey="t"
@@ -950,6 +1175,8 @@ export default function App(){
               {top10Series.map(({ name, color }) => {
                 const selected = (name === pA || name === pB);
                 const opacity = hasSelection ? (selected ? 1 : 0.4) : 1;
+
+
 
                 return (
                   <Line
@@ -994,7 +1221,35 @@ export default function App(){
               {compareOn && pB && (
                 <Line type="monotone" data={bSeries} dataKey="v" name={`B: ${pB}`} stroke="#ef476f" strokeWidth={2.5} dot={false} isAnimationActive={false} />
               )}
-            </LineChart>
+
+{/* Death flags in current window */}
+{deathFlags.map(df => (
+  <ReferenceLine
+    key={`death-${df.name}-${df.t}`}
+    x={df.t}
+    stroke="#ff6464"
+    strokeOpacity={0.9}
+    strokeDasharray="3 3"
+    isFront
+    label={<DeathLabel value={df.name} size={16} dy={14} anchor="top" />}
+  />
+))}
+
+{selecting && (
+  <ReferenceArea
+    x1={Math.max(selecting.x0, selecting.x1)}
+    x2={Math.min(selecting.x0, selecting.x1)}
+    strokeOpacity={0}
+    fill="rgba(33,212,253,0.12)"
+  />
+)}
+{hoverX != null && !selecting && (
+  <ReferenceLine x={hoverX} stroke="#62b0ff" strokeDasharray="3 3" />
+)}
+
+{selecting && (<ReferenceArea x1={Math.max(selecting.x0, selecting.x1)} x2={Math.min(selecting.x0, selecting.x1)} strokeOpacity={0} fill="rgba(33,212,253,0.12)" />)}
+{hoverX != null && !selecting && (<ReferenceLine x={hoverX} stroke="#62b0ff" strokeDasharray="3 3" />)}
+</LineChart>
           </ResponsiveContainer>
         </div>
       </div>
@@ -1026,13 +1281,13 @@ export default function App(){
               <thead>
                 <tr>
                   <th>Ability</th>
-                  <th>Hits</th>
-                  <th>Damage</th>
-                  <th>Avg</th>
-                  <th>Max</th>
-                  <th>% of Player</th>
-    <th>Elemental Type</th>
-    <th>Elemental % of Damage</th>
+                  <th className="num">HITS</th>
+                  <th className="num">DAMAGE</th>
+                  <th className="num">AVG</th>
+                  <th className="num">MAX</th>
+                  <th className="num">% OF PLAYER</th>
+    <th className="num">ELEMENTAL TYPE</th>
+    <th className="num">ELEMENTAL % OF DAMAGE</th>
                 </tr>
               </thead>
 <tbody>
@@ -1050,13 +1305,11 @@ export default function App(){
         .filter(e =>
           e.t >= winStart &&
           e.t <= winEnd &&
-          e.src === player &&
-          e.flags === 'periodic'
+          canonEntity(e.src) === player &&
+          isPeriodic(e as any)
         )
         .map(e => normalizeAbilityName(e.ability))
-    );
-
-    const map = (perAbility[player] || {}) as Record<string,{hits:number;dmg:number;max:number}>;
+    );const map = (perAbility[player] || {}) as Record<string,{hits:number;dmg:number;max:number}>;
     const entries = Object.entries(map);
     const total = entries.reduce((sum, [,v]) => sum + (v?.dmg || 0), 0);
 
@@ -1093,13 +1346,13 @@ export default function App(){
                 >
                   {isOpen ? '▾' : '▸'}
                 </button>{' '}
-                {r.ability}{isDoT ? ' (Damage over Time)' : ''}
+                {r.ability + (isDoT ? ' (Damage over Time)' : '')}
               </td>
-              <td>{fmt0(r.hits)}</td>
-              <td>{fmt0(r.damage)}</td>
-              <td>{fmt0(r.avg)}</td>
-              <td>{fmt0(r.max)}</td>
-              <td className="muted">{total>0 ? `${(r.damage/total*100).toFixed(1)}%` : '—'}</td>
+              <td className="num">{fmt0(r.hits)}</td>
+              <td className="num">{fmt0(r.damage)}</td>
+              <td className="num">{fmt0(r.avg)}</td>
+              <td className="num">{fmt0(r.max)}</td>
+              <td className="num">{total>0 ? `${(r.damage/total*100).toFixed(1)}%` : '—'}</td>
             
               {/* Elemental columns (injected) */}
               {(() => {
@@ -1110,9 +1363,9 @@ export default function App(){
                   const playerName = (pA || names?.[0] || "");
                   const elemTotals = collectAbilityElements(damageEvents as any, playerName, abilityNorm, winStart, winEnd);
                   const { types, pct } = summarizeElements(elemTotals);
-                  return (<><td>{types}</td><td className="nowrap">{pct}</td></>);
+                  return (<><td className="num">{types}</td><td className="num nowrap">{pct}</td></>);
                 } catch {
-                  return (<><td>—</td><td>—</td></>);
+                  return (<><td className="num">—</td><td className="num">—</td></>);
                 }
               })()}
 </tr>
@@ -1138,20 +1391,20 @@ export default function App(){
                       <thead>
                         <tr>
                           <th>Target</th>
-                          <th>Hits</th>
-                          <th>Damage</th>
-                          <th>Avg</th>
-                          <th>Max</th>
+                          <th className="num">HITS</th>
+                          <th className="num">DAMAGE</th>
+                          <th className="num">AVG</th>
+                          <th className="num">MAX</th>
                         </tr>
                       </thead>
                       <tbody>
                         {targets.map(t => (
                           <tr key={t.target}>
                             <td className="muted">{t.target}</td>
-                            <td>{fmt0(t.hits)}</td>
-                            <td>{fmt0(t.damage)}</td>
-                            <td>{fmt0(t.avg)}</td>
-                            <td>{fmt0(t.max)}</td>
+                            <td className="num">{fmt0(t.hits)}</td>
+                            <td className="num">{fmt0(t.damage)}</td>
+                            <td className="num">{fmt0(t.avg)}</td>
+                            <td className="num">{fmt0(t.max)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -1199,7 +1452,8 @@ export default function App(){
       )}
     </div>
   </div>
-  </ErrorBoundary>;
+    </div>
+</ErrorBoundary>;
 }
 
 /* ========================= Shared panel renderer ========================= */
@@ -1219,7 +1473,7 @@ function renderPanel(
       <div><ClassLegend /></div>
     </div>
     <div style={{ padding:14, height:360 }}>
-      <ResponsiveContainer>
+      <ResponsiveContainer debounce={200}>
         <BarChart data={list} layout="vertical" margin={{ top:6, right:40, left:20, bottom:6 }} barCategoryGap="28%" barGap={6}>
           <CartesianGrid horizontal={false} strokeDasharray="3 3" />
           <YAxis type="category" dataKey="name"

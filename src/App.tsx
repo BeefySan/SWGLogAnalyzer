@@ -3,9 +3,12 @@ import ErrorBoundary from "./ErrorBoundary";
 import {
   ResponsiveContainer,
   AreaChart, Area, LineChart, Line,
-  CartesianGrid, XAxis, YAxis, Tooltip, Legend,
-  BarChart, Bar, LabelList, Cell
+  CartesianGrid, XAxis, YAxis,
+  Tooltip, Legend,          // <- Recharts Tooltip
+  BarChart, Bar, LabelList, Cell,
+  Sankey,                   // <- Recharts Sankey
 } from "recharts";
+
 
 /* ========================= Utilities & Types ========================= */
 
@@ -13,6 +16,7 @@ type MetricKey = 'damageDealt'|'avgDps'|'healingDone';
 type PlayerRow = { name:string; profession?:string; damageDealt:number; healingDone:number; avgDps:number };
 
 type DamageEvent = {
+
   t: number;
   src: string;
   dst: string;
@@ -22,7 +26,33 @@ type DamageEvent = {
   blocked?: number;      // "(N points blocked)" parsed from the line
   absorbed?: number;     // "Armor absorbed N points ..."
   preMitTotal?: number;  // "... out of T" (pre-mit total)
+  evadedPct?: number;    // "(X% evaded)" — optional
 };
+
+export type DFEvent = DamageEvent & {
+  // some logs use alternate keys for the defender
+  target?: string;
+  victim?: string;
+  defender?: string;
+};
+
+// ---- Helpers (keep ONE copy only) ----
+const nf0  = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+const fmt0 = (v: number) => nf0.format(Math.round(v || 0));
+const pct  = (n: number, d: number) => (d > 0 ? (n / d) * 100 : 0);
+
+// normalize a name & remove UI prefixes like "A: " / "B: "
+const norm = (s?: string) => (s ?? "").normalize("NFKC").trim().toLowerCase();
+const cleanName = (s?: string) =>
+  norm(s).replace(/^(a|b)\s*:\s*/, "").replace(/^player\s*(a|b)\s*:\s*/, "");
+
+const flagOf = (e: DFEvent) => (e.flags ?? "").toString().toLowerCase();
+const isPeriodic = (e: DFEvent) => flagOf(e).includes("periodic");
+
+// destination with fallbacks (dst/target/victim/defender)
+const getDst = (e: DFEvent) =>
+  cleanName(e.dst) || cleanName(e.target) || cleanName(e.victim) || cleanName(e.defender);
+
 
 type HealEvent = {
   t: number;
@@ -35,9 +65,7 @@ type HealEvent = {
 type PerAbility = Record<string, Record<string, { hits:number; dmg:number; max:number }>>;
 type PerAbilityTargets = Record<string, Record<string, Record<string, { hits:number; dmg:number; max:number }>>>;
 
-const nf0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
 const nf1 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
-const fmt0 = (v?:number|null)=> nf0.format(Math.round(Number(v||0)));
 const fmt1 = (v?:number|null)=> nf1.format(Number(v||0));
 const toMMSS = (s:number) => {
   const m = Math.floor(Math.max(0, s)/60);
@@ -313,7 +341,7 @@ export default function App(){
   const [collectUnparsed, setCollectUnparsed] = useState(false);
   const [parsing, setParsing] = useState<{done:number,total:number}|null>(null);
   const [compareOn, setCompareOn] = useState(true);
-  const [pA, setPA] = useState(''); const [pB, setPB] = useState('');
+  const [pA, setPA] = useState(''); const [pB, setPB] = useState(''); 
   const [mode, setMode] = useState<'sources'|'abilities'|'statistics'>('sources'); // <- extended
   const [smooth, setSmooth] = useState(true);
   const workerRef = useRef<Worker|null>(null);
@@ -1012,6 +1040,341 @@ function renderPanel(
   </div>;
 }
 
+// ============================= DefenseFlow =============================
+export function DefenseFlow({
+  actor,
+  events,
+  windowStart,
+  windowEnd,
+}: {
+  actor: string;
+  events: DFEvent[];
+  windowStart: number;
+  windowEnd: number;
+}) {
+  const fmt0 = (v: number) =>
+    new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(
+      Math.round(v || 0)
+    );
+  const pct = (n: number, d: number) => (d > 0 ? (n / d) * 100 : 0);
+
+  const CE = (s?: string) => canonEntity(cleanName(s || ""));
+  const flags = (e: DFEvent) => (e.flags ?? "").toString().toLowerCase();
+  const isPeriodic = (e: DFEvent) => flags(e).includes("periodic");
+  const getDstAny = (e: DFEvent) =>
+    e.dst ?? e.target ?? e.victim ?? e.defender ?? "";
+
+  const C = {
+    landed: "#ef4444",
+    unblocked: "#ef4444",
+    block: "#f59e0b",
+    dodge: "#63d26c",
+    parry: "#cde15a",
+    glance: "#3498db",        // NEW: Glance color
+    nodeFill: "#0f172a",
+    nodeStroke: "#203047",
+    text: "#ffffff",
+    linkHalo: "#0b1220",
+  };
+
+  const ShadowText: React.FC<{
+    x: number; y: number; fs?: number; anchor?: "start"|"middle"|"end";
+    children: React.ReactNode;
+  }> = ({ x, y, fs = 16, anchor = "start", children }) => (
+    <text
+      x={x}
+      y={y}
+      textAnchor={anchor}
+      fontSize={fs}
+      fill={C.text}
+      stroke="#000"
+      strokeWidth={3.6}
+      paintOrder="stroke"
+      style={{ pointerEvents: "none" }}
+    >
+      {children}
+    </text>
+  );
+
+  if (!actor) {
+    return <div className="card" style={{ padding:12, color:"#9fb7d8" }}>
+      Select a player to see their defensive flow.
+    </div>;
+  }
+
+  // -------- windowed incoming, direct only --------
+  const incoming = React.useMemo(() => {
+    const A = CE(actor);
+    const inWin = (e: DFEvent) => e.t >= windowStart && e.t <= windowEnd;
+    return events.filter(
+      (e) => inWin(e) && !isPeriodic(e) && CE(getDstAny(e)) === A
+    );
+  }, [events, actor, windowStart, windowEnd]);
+
+  const hitsTaken    = incoming.filter(e => (e.amount||0) > 0).length;
+  const dodgeCount   = incoming.filter(e => flags(e).includes("dodge")).length;
+  const parryCount   = incoming.filter(e => flags(e).includes("parry")).length;
+  const blockCount   = incoming.filter(e => (e.blocked||0) > 0 && (e.amount||0) > 0).length;
+  const unblockedCnt = Math.max(0, hitsTaken - blockCount);
+  const attempts     = hitsTaken + dodgeCount + parryCount;
+
+  // NEW: glancing events (landed + flags === 'glance')
+  const glanceCount  = incoming.filter(e => (e.amount||0) > 0 && flags(e) === "glance").length;
+  const glancePctOfLanded = pct(glanceCount, hitsTaken);
+
+  // side metrics (unchanged)
+  const evSamples = incoming.filter(e => (e.amount||0) > 0 && typeof e.evadedPct === "number");
+  const evEvents  = evSamples.length;
+  const avgEv     = evEvents ? evSamples.reduce((s,e)=> s+(e.evadedPct||0),0)/evEvents : 0;
+  const evTotal   = evSamples.reduce((s,e)=>{
+    const base = e.preMitTotal ?? (e.amount||0) + (e.absorbed||0);
+    return s + base * ((e.evadedPct||0)/100);
+  }, 0);
+  const evAvgAmt  = evEvents ? evTotal / evEvents : 0;
+
+  if (!attempts) {
+    return <div className="card" style={{ padding:12, color:"#9fb7d8" }}>
+      No defensive events in this window.
+    </div>;
+  }
+
+  // ===== decide which goes on top in the MIDDLE column =====
+  const dodgeOnTop = dodgeCount > parryCount; // larger should be on top
+  const TOP_LABEL  = dodgeOnTop ? "Dodge" : "Parry";
+  const BOT_LABEL  = dodgeOnTop ? "Parry" : "Dodge";
+  const hasDodge   = dodgeCount > 0;
+  const hasParry   = parryCount > 0;
+
+  // ---- nodes ----
+  const N_D_END="__dodge_end__", N_P_END="__parry_end__", EPS=1e-5;
+  const nodes: Array<{name:string}> = [];
+  const idx: Record<string,number> = {};
+  const add = (name:string)=> (idx[name] = nodes.push({name}) - 1);
+
+  add("Total Attempts");               // only node in column 0 -> centers vertically
+  if (hasDodge || hasParry) add(TOP_LABEL);   // column 1 (top)
+  if (hasDodge || hasParry) add(BOT_LABEL);   // column 1 (bottom)
+  add("Landed");                       // column 2
+  add("Unblocked");                    // column 3
+  add("Block");                        // column 3
+  add("Glance");                       // NEW: column 3 (under Block)
+  if (hasDodge) add(N_D_END);          // hidden end-caps to stabilize layout
+  if (hasParry) add(N_P_END);
+
+  // ---- links ----
+  const links:any[] = [];
+  links.push({ source:idx["Total Attempts"], target:idx["Landed"], value:hitsTaken, color:C.landed });
+  if (hasDodge) links.push({ source:idx["Total Attempts"], target:idx["Dodge"], value:dodgeCount, color:C.dodge });
+  if (hasParry) links.push({ source:idx["Total Attempts"], target:idx["Parry"], value:parryCount, color:C.parry });
+  links.push({ source:idx["Landed"], target:idx["Unblocked"], value:unblockedCnt, color:C.unblocked });
+  links.push({ source:idx["Landed"], target:idx["Block"],     value:blockCount,   color:C.block });
+  // NEW: Landed -> Glance (with % of Landed in payload.meta)
+  links.push({
+    source: idx["Landed"],
+    target: idx["Glance"],
+    value: glanceCount,
+    color: C.glance,
+    meta: { pctOfLanded: glancePctOfLanded }
+  });
+  if (hasDodge) links.push({ source:idx["Dodge"], target:idx[N_D_END], value:EPS, color:"transparent" });
+  if (hasParry) links.push({ source:idx["Parry"], target:idx[N_P_END], value:EPS, color:"transparent" });
+
+  // ===== custom link renderer =====
+  const CurvedLink: React.FC<any> = (p) => {
+    const { sourceX, sourceY, targetX, targetY, linkWidth, payload } = p;
+    if (!payload || (payload.value ?? 0) <= 0) return null;
+    if (payload?.color === "transparent") return null;
+
+    const sName = String(payload?.source?.name || "");
+    const tName = String(payload?.target?.name || "");
+
+    const half = Math.max(10, (linkWidth || 0) / 2);
+    const CAP_DEF = Math.min(6, Math.max(4, half * 0.35));
+
+    // visual shaping
+    const LEFT_STAGGER = 0;
+    const LANE_GAP     = Math.max(0, half * 1.35);
+    const CURVE_AVOID  = 0.001;  // very shallow near the source
+    const CURVE_OTHER  = 0.014;
+
+    const isAvoid = sName === "Total Attempts" && (tName === "Dodge" || tName === "Parry");
+    const startX  = (isAvoid ? sourceX + LEFT_STAGGER : sourceX) + CAP_DEF;
+    const endX    = targetX - CAP_DEF;
+
+    // --- offset only at the source; keep target centered ---
+    let sy = sourceY;
+    let ty = targetY;
+    if (isAvoid) {
+      const sign   = (tName === (dodgeOnTop ? "Dodge" : "Parry")) ? -1 : +1;
+      const offset = sign * LANE_GAP;
+      sy += offset;
+    }
+
+    const t = isAvoid ? CURVE_AVOID : CURVE_OTHER;
+    const c1x = startX * (1 - t) + endX * t;
+    const c2x = startX * t + endX * (1 - t);
+    const c1y = sy;
+    const c2y = ty;
+
+    const d = `M ${startX},${sy} C ${c1x},${c1y} ${c2x},${c2y} ${endX},${ty}`;
+
+    const mainW   = Math.max(2, linkWidth);
+    const haloW   = mainW + 3;
+    const outline = mainW + 2.5;
+
+    // Label text: for Glance show "count (xx.x%)", others show count
+    const label =
+      tName === "Glance" && payload?.meta?.pctOfLanded != null
+        ? `${fmt0(payload.value)} (${Number(payload.meta.pctOfLanded).toFixed(1)}%)`
+        : fmt0(payload.value);
+
+    return (
+      <g style={{ shapeRendering: "geometricPrecision" }}>
+        <path d={d} stroke={C.linkHalo}              strokeWidth={haloW}   strokeLinecap="butt" strokeLinejoin="round" fill="none" opacity={0.85}/>
+        <path d={d} stroke={payload.color || "#888"} strokeWidth={outline} strokeLinecap="butt" strokeLinejoin="round" fill="none"/>
+        <path d={d} stroke={payload.color || "#888"} strokeWidth={mainW}   strokeLinecap="butt" strokeLinejoin="round" fill="none" opacity={0.98}/>
+        <text
+          x={(startX + endX) / 2}
+          y={(sy + ty) / 2 - 1}
+          textAnchor="middle"
+          fontSize={16}
+          fill="#fff"
+          stroke="#000"
+          strokeWidth={3.6}
+          paintOrder="stroke"
+          style={{ pointerEvents: "none" }}
+        >
+          {label}
+        </text>
+      </g>
+    );
+  };
+
+  // Bigger & visually centered "Total Attempts" node (without breaking links)
+  const FlowNode: React.FC<any> = ({ x, y, width, height, payload }) => {
+    const name = String(payload?.name || "");
+    if (name === N_D_END || name === N_P_END) return null;
+
+    // base used for percentages
+    let base = attempts;
+    if (name === "Block" || name === "Unblocked" || name === "Glance") base = Math.max(1, hitsTaken); // % of Landed
+    const inVal = (payload?.value ?? 0) || 0;
+
+    const swatch =
+      name === "Landed"   ? C.landed   :
+      name === "Unblocked"? C.unblocked:
+      name === "Block"    ? C.block    :
+      name === "Glance"   ? C.glance   :
+      name === "Dodge"    ? C.dodge    :
+      name === "Parry"    ? C.parry    : "#64748b";
+
+    const MIN_H_TOTAL = 40;
+    const MIN_H_OTHER = 14;
+    const wantMin = name === "Total Attempts" ? MIN_H_TOTAL : MIN_H_OTHER;
+    const drawH   = Math.max(height, wantMin);
+    const drawY   = y + (height - drawH) / 2;
+
+    return (
+      <g>
+        <rect x={x} y={drawY} width={width} height={drawH} rx={6} fill={C.nodeFill} stroke={C.nodeStroke}/>
+        <rect x={x + 2} y={drawY + Math.max(0, (drawH - 12) / 2)} width={10} height={12} rx={3} fill={swatch}/>
+        <ShadowText x={x + width + 8} y={drawY + Math.max(16, drawH / 2)} fs={18}>{name}</ShadowText>
+        <ShadowText x={x + width + 8} y={drawY + Math.max(16, drawH / 2) + 20} fs={15}>
+          {fmt0(inVal)} ({pct(inVal, base).toFixed(1)}%)
+        </ShadowText>
+      </g>
+    );
+  };
+
+  // Enforce the middle-column order and right-column order
+  const middleOrder = [TOP_LABEL, BOT_LABEL];
+  const sortFn = (a: any, b: any) => {
+    if (a.depth !== b.depth) return 0;
+    if (a.depth === 1) {
+      const ia = middleOrder.indexOf(a.name);
+      const ib = middleOrder.indexOf(b.name);
+      if (ia !== -1 && ib !== -1) return ia - ib;
+    }
+    if (a.depth === 3) {
+      const order = ["Unblocked", "Block", "Glance"]; // NEW: Glance under Block
+      const ia = order.indexOf(a.name), ib = order.indexOf(b.name);
+      if (ia !== -1 && ib !== -1) return ia - ib;
+    }
+    return 0;
+  };
+
+  return (
+    <div style={{ display:"grid", gridTemplateColumns:"1fr 360px", gap:16 }}>
+      <div className="card" style={{ padding:8 }}>
+        <div style={{ fontSize:12, color:"#9fb7d8" }}>
+          Attempts → <b>Dodge</b> / <b>Parry</b> / <b>Landed</b> → <b>Block</b> / <b>Glance</b> / <b>Unblocked</b>
+        </div>
+        <div style={{ marginTop:6, marginBottom:6 }}>
+          <span style={{ display:"inline-flex", alignItems:"center", gap:6, marginRight:12, fontSize:12, color:"#cfe3ff" }}>
+            <span style={{ width:12, height:12, borderRadius:3, background:C.dodge }}/>Dodge
+          </span>
+          <span style={{ display:"inline-flex", alignItems:"center", gap:6, marginRight:12, fontSize:12, color:"#cfe3ff" }}>
+            <span style={{ width:12, height:12, borderRadius:3, background:C.parry }}/>Parry
+          </span>
+          <span style={{ display:"inline-flex", alignItems:"center", gap:6, marginRight:12, fontSize:12, color:"#cfe3ff" }}>
+            <span style={{ width:12, height:12, borderRadius:3, background:C.landed }}/>Landed
+          </span>
+          <span style={{ display:"inline-flex", alignItems:"center", gap:6, marginRight:12, fontSize:12, color:"#cfe3ff" }}>
+            <span style={{ width:12, height:12, borderRadius:3, background:C.block }}/>Block
+          </span>
+          <span style={{ display:"inline-flex", alignItems:"center", gap:6, marginRight:12, fontSize:12, color:"#cfe3ff" }}>
+            <span style={{ width:12, height:12, borderRadius:3, background:C.glance }}/>Glance (from Landed)
+          </span>
+          <span style={{ display:"inline-flex", alignItems:"center", gap:6, marginRight:12, fontSize:12, color:"#cfe3ff" }}>
+            <span style={{ width:12, height:12, borderRadius:3, background:C.unblocked }}/>Unblocked (from Landed)
+          </span>
+        </div>
+        <div style={{ fontSize:11, color:"#7fa2d1", marginBottom:4 }}>
+          percentages are of <i>Attempts</i> or of <i>Landed</i> where indicated
+        </div>
+
+        <div style={{ height: 280, overflow: "hidden" }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <Sankey
+              key={`${TOP_LABEL}-${BOT_LABEL}-${attempts}`} // force fresh layout when order flips
+              data={{ nodes: nodes as any, links: links as any }}
+              nodePadding={40}
+              nodeWidth={16}
+              iterations={64}
+              margin={{ top: 10, right: 110, bottom: 54, left: 110 }}
+              link={<CurvedLink />}
+              node={<FlowNode />}
+              linkCurvature={0.10}
+              sort={sortFn as any}
+              nodeSort={sortFn as any}
+            >
+              <Tooltip formatter={(v: number) => fmt0(Number(v))} />
+            </Sankey>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* side metrics */}
+      <div className="card" style={{ padding:12 }}>
+        <div style={{ fontSize:14, fontWeight:800, color:"#9fb7d8", marginBottom:8 }}>Evasion</div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", rowGap:8 }}>
+          <div style={{ opacity:.85 }}>Events</div>
+          <div style={{ textAlign:"right" }}>{fmt0(evEvents)}</div>
+          <div style={{ opacity:.85 }}>Avg % evaded</div>
+          <div style={{ textAlign:"right" }}>{evEvents ? `${avgEv.toFixed(1)}%` : "—"}</div>
+          <div style={{ opacity:.85 }}>Total evaded</div>
+          <div style={{ textAlign:"right" }}>{fmt0(evTotal)}</div>
+          <div style={{ opacity:.85 }}>Avg evaded / event</div>
+          <div style={{ textAlign:"right" }}>{fmt0(evAvgAmt)}</div>
+        </div>
+        <div style={{ marginTop:10, fontSize:11, color:"#8aa3c6" }}>
+          Evaded amount ≈ pre-mit total × evaded % (or (damage+absorbed) × % when needed).
+        </div>
+      </div>
+    </div>
+  );
+}
+// =========================== end DefenseFlow ===========================
 /* ========================= Statistics Tab Component ========================= */
 
 function StatisticsTab({
@@ -1036,89 +1399,126 @@ function StatisticsTab({
   const hasActor = !!actor;
   const dur = Math.max(1, windowEnd - windowStart + 1);
 
+  // Canon + DoT helpers (reuse the canonEntity you already defined in this file)
+  const CE = (s?: string) => canonEntity(String(s ?? ""));
+  const isDot = (e: DamageEvent) =>
+    (e.flags ?? "").toString().toLowerCase().includes("periodic");
+
   // Windowed slices
   const dEvAll = useMemo(
     () => damageEvents.filter(e => e.t >= windowStart && e.t <= windowEnd),
     [damageEvents, windowStart, windowEnd]
   );
+
   const dEvByActor = useMemo(
-    () => (hasActor ? dEvAll.filter(e => e.src === actor) : dEvAll),
+    () => (hasActor ? dEvAll.filter(e => CE(e.src) === CE(actor)) : dEvAll),
     [dEvAll, hasActor, actor]
   );
+
   const dEvIncoming = useMemo(
-    () => (hasActor ? dEvAll.filter(e => e.dst === actor) : []),
+    () => (hasActor ? dEvAll.filter(e => CE(e.dst) === CE(actor)) : []),
     [dEvAll, hasActor, actor]
   );
+
   const hEvSrc = useMemo(
-    () => healEvents.filter(e => e.t >= windowStart && e.t <= windowEnd && (!hasActor || e.src === actor)),
+    () =>
+      healEvents.filter(
+        e =>
+          e.t >= windowStart &&
+          e.t <= windowEnd &&
+          (!hasActor || CE(e.src) === CE(actor))
+      ),
     [healEvents, windowStart, windowEnd, hasActor, actor]
   );
+
   const hEvDst = useMemo(
-    () => (hasActor ? healEvents.filter(e => e.t >= windowStart && e.t <= windowEnd && e.dst === actor) : []),
+    () =>
+      hasActor
+        ? healEvents.filter(
+            e => e.t >= windowStart && e.t <= windowEnd && CE(e.dst) === CE(actor)
+          )
+        : [],
     [healEvents, windowStart, windowEnd, hasActor, actor]
   );
 
   // ========================= Offensive aggregates =========================
-  const totalDmg = dEvByActor.reduce((s,e)=> s + e.amount, 0);
-  const dotDmg   = dEvByActor.filter(e => e.flags === 'periodic').reduce((s,e)=> s + e.amount, 0);
-  const directDmg= totalDmg - dotDmg;
-  const maxHit   = dEvByActor.reduce((m,e)=> Math.max(m, e.amount), 0);
-  const targets  = new Set(dEvByActor.map(e => e.dst)).size;
+  const totalDmg  = dEvByActor.reduce((s, e) => s + e.amount, 0);
+  const dotDmg    = dEvByActor.filter(isDot).reduce((s, e) => s + e.amount, 0);
+  const directDmg = totalDmg - dotDmg;
+  const maxHit    = dEvByActor.reduce((m, e) => Math.max(m, e.amount), 0);
+  const targets   = new Set(dEvByActor.map(e => e.dst)).size;
   const abilitiesUsed = hasActor ? Object.keys(perAbility[actor] || {}).length : 0;
-  const actions  = dEvByActor.length + hEvSrc.length;
-  const apm      = actions / (dur / 60);
+  const actions   = dEvByActor.length + hEvSrc.length;
+  const apm       = actions / (dur / 60);
 
   // Direct swings by flag (exclude DoTs)
-  const swings = dEvByActor.filter(e => e.flags !== 'periodic');
-  let hitCount=0, critCount=0, stCount=0, hitDmg=0, critDmg=0, stDmg=0;
-  for (const e of swings){
-    const f = (e.flags || 'hit');
-    if (f === 'crit') { critCount++; critDmg += e.amount; }
-    else if (f === 'strikethrough') { stCount++; stDmg += e.amount; }
+  const swings = dEvByActor.filter(e => !isDot(e));
+  let hitCount = 0, critCount = 0, stCount = 0, hitDmg = 0, critDmg = 0, stDmg = 0;
+  for (const e of swings) {
+    const f = (e.flags || "hit");
+    if (f === "crit") { critCount++; critDmg += e.amount; }
+    else if (f === "strikethrough") { stCount++; stDmg += e.amount; }
     else { hitCount++; hitDmg += e.amount; }
   }
-  const totalSwings = swings.length || 1;
+  const totalSwings   = swings.length || 1;
   const pct = (n:number, d:number)=> d ? (n/d*100) : 0;
 
-  const hitDmgPct   = pct(hitDmg, totalDmg);
-  const critDmgPct  = pct(critDmg, totalDmg);
-  const stDmgPct    = pct(stDmg, totalDmg);
+  const hitDmgPct     = pct(hitDmg, totalDmg);
+  const critDmgPct    = pct(critDmg, totalDmg);
+  const stDmgPct      = pct(stDmg, totalDmg);
   const hitChancePct  = pct(hitCount, totalSwings);
   const critChancePct = pct(critCount, totalSwings);
   const stChancePct   = pct(stCount, totalSwings);
 
-  // ========================= Defensive aggregates =========================
-  // Consider incoming direct interactions (exclude DoTs)
-  const incomingDirect = dEvIncoming.filter(e => e.flags !== 'periodic');
-  const hitsTakenDirect = incomingDirect.filter(e => e.amount > 0).length;
+// ========================= Defensive aggregates =========================
+const incomingDirect   = dEvIncoming.filter(e => !isDot(e));
+const hitsTakenDirect  = incomingDirect.filter(e => e.amount > 0).length;
 
-  // Dodge / Parry: count zero-damage outcomes; denom = hitsTaken + outcomeCount
-  const dodgeCount = incomingDirect.filter(e => e.flags === 'dodge').length;
-  const parryCount = incomingDirect.filter(e => e.flags === 'parry').length;
-  const dodgeChance = pct(dodgeCount, hitsTakenDirect + dodgeCount);
-  const parryChance = pct(parryCount, hitsTakenDirect + parryCount);
+// Dodge / Parry counts
+const dodgeCount = incomingDirect.filter(e =>
+  (e.flags ?? "").toString().toLowerCase().includes("dodge")
+).length;
+const parryCount = incomingDirect.filter(e =>
+  (e.flags ?? "").toString().toLowerCase().includes("parry")
+).length;
 
-  // Block: hits that landed and had "(N points blocked)"
-  const blockEvents = incomingDirect.filter(e => (e.blocked || 0) > 0 && e.amount > 0);
-  const blockCount = blockEvents.length;
-  const totalBlocked = blockEvents.reduce((s,e)=> s + (e.blocked || 0), 0);
-  const avgBlocked = blockCount ? (totalBlocked / blockCount) : 0;
-  // Block chance as fraction of all landed hits
-  const blockChance = pct(blockCount, hitsTakenDirect);
+// NEW: attempts = landed (amount>0, includes glances) + dodges + parries
+const attempts = hitsTakenDirect + dodgeCount + parryCount;
 
-  // Armor mitigation: average of (absorbed / preMitTotal) for events that include both numbers
+// NEW: chances use attempts as the denominator
+const dodgeChance = pct(dodgeCount, attempts);
+const parryChance = pct(parryCount, attempts);
+
+// Glancing blows (count, % of Landed, average glance amount)
+const glanceEvents = incomingDirect.filter(
+  e => (e.flags ?? '').toString().toLowerCase().includes('glance') && (e.amount || 0) > 0
+);
+const glanceCount  = glanceEvents.length;
+// % should match Defense Flow: percent of Landed (i.e., of hitsTakenDirect)
+const glanceChance = pct(glanceCount, hitsTakenDirect);
+const avgGlance    = glanceCount
+  ? glanceEvents.reduce((s, e) => s + (e.amount || 0), 0) / glanceCount
+  : 0;
+
+// Block (unchanged): % of Landed
+const blockEvents  = incomingDirect.filter(e => (e.blocked || 0) > 0 && e.amount > 0);
+const blockCount   = blockEvents.length;
+const totalBlocked = blockEvents.reduce((s,e)=> s + (e.blocked || 0), 0);
+const avgBlocked   = blockCount ? (totalBlocked / blockCount) : 0;
+const blockChance  = pct(blockCount, hitsTakenDirect);
+
+  // Armor mitigation
   const mitSamples = incomingDirect.filter(e => (e.absorbed ?? 0) > 0 && (e.preMitTotal ?? 0) > 0);
   const avgArmorMitigation = mitSamples.length
     ? (mitSamples.reduce((s,e)=> s + (Number(e.absorbed)/Number(e.preMitTotal)), 0) / mitSamples.length * 100)
     : 0;
 
-  // Keep the original "Damage Taken" based on totals we already have
-  const dmgTaken = hasActor ? (perTaken[actor] || 0) : 0;
-  // Update "Hits Taken" to mean landed direct hits (no DoTs, no dodges/parries)
+  // Totals
+  const dmgTaken  = hasActor ? (perTaken[actor] || 0) : 0;
   const hitsTaken = hitsTakenDirect;
   const dpmTaken  = dmgTaken / (dur / 60);
   const healsRecv = hEvDst.reduce((s,e)=> s + e.amount, 0);
-  const selfHeal  = hasActor ? hEvDst.filter(e => e.src === actor).reduce((s,e)=> s + e.amount, 0) : 0;
+  const selfHeal  = hasActor ? hEvDst.filter(e => CE(e.src) === CE(actor)).reduce((s,e)=> s + e.amount, 0) : 0;
 
   const attackers = hasActor
     ? Object.entries(perTakenBy[actor] || {}).sort((a,b)=> b[1]-a[1]).slice(0, 6)
@@ -1126,75 +1526,84 @@ function StatisticsTab({
 
   // Layout
   const gridStyle: React.CSSProperties = { display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, marginTop:16 };
-  const card: React.CSSProperties = { padding:12, borderRadius:10, background:'rgba(255,255,255,0.03)', border:'1px solid rgba(255,255,255,0.08)' };
-  const th: React.CSSProperties = { textAlign:'left', opacity:0.8, fontWeight:600, padding:'6px 8px' };
-  const td: React.CSSProperties = { textAlign:'right', padding:'6px 8px', fontVariantNumeric:'tabular-nums' };
-  const title: React.CSSProperties = { margin:'0 0 8px 0', fontSize:14, fontWeight:700, opacity:0.9 };
+  const card: React.CSSProperties      = { padding:12, borderRadius:10, background:'rgba(255,255,255,0.03)', border:'1px solid rgba(255,255,255,0.08)' };
+  const th: React.CSSProperties        = { textAlign:'left', opacity:0.8, fontWeight:600, padding:'6px 8px' };
+  const td: React.CSSProperties        = { textAlign:'right', padding:'6px 8px', fontVariantNumeric:'tabular-nums' };
+  const title: React.CSSProperties     = { margin:'0 0 8px 0', fontSize:14, fontWeight:700, opacity:0.9 };
   const labelSuffix = hasActor ? ` — ${actor}` : '';
-
   const fmtPct1 = (v:number)=> `${v.toFixed(1)}%`;
 
   return (
-    <div style={gridStyle}>
-      {/* Offensive */}
-      <div className="card" style={card}>
-        <h3 style={title}>Offensive Statistics{labelSuffix}</h3>
-        <table className="table" style={{ width:'100%', borderCollapse:'collapse' }}>
-          <tbody>
-            <tr><th style={th}>Total Damage</th><td style={td}>{fmt0(totalDmg)}</td></tr>
-            <tr><th style={th}>Direct Damage</th><td style={td}>{fmt0(directDmg)} {totalDmg ? `(${((directDmg/totalDmg)*100).toFixed(1)}%)` : ''}</td></tr>
-            <tr><th style={th}>DoT Damage</th><td style={td}>{fmt0(dotDmg)} {totalDmg ? `(${((dotDmg/totalDmg)*100).toFixed(1)}%)` : ''}</td></tr>
-            <tr><th style={th}>Max Hit</th><td style={td}>{fmt0(maxHit)}</td></tr>
-            <tr><th style={th}>Unique Targets Hit</th><td style={td}>{fmt0(targets)}</td></tr>
-            <tr><th style={th}>Abilities Used</th><td style={td}>{fmt0(abilitiesUsed)}</td></tr>
-            <tr><th style={th}>Actions per Minute (APM)</th><td style={td}>{fmt1(apm)}</td></tr>
+    <>
+      <div style={gridStyle}>
+        {/* Offensive */}
+        <div className="card" style={card}>
+          <h3 style={title}>Offensive Statistics{labelSuffix}</h3>
+          <table className="table" style={{ width:'100%', borderCollapse:'collapse' }}>
+            <tbody>
+              <tr><th style={th}>Total Damage</th><td style={td}>{fmt0(totalDmg)}</td></tr>
+              <tr><th style={th}>Direct Damage</th><td style={td}>{fmt0(directDmg)} {totalDmg ? `(${((directDmg/totalDmg)*100).toFixed(1)}%)` : ''}</td></tr>
+              <tr><th style={th}>DoT Damage</th><td style={td}>{fmt0(dotDmg)} {totalDmg ? `(${((dotDmg/totalDmg)*100).toFixed(1)}%)` : ''}</td></tr>
+              <tr><th style={th}>Max Hit</th><td style={td}>{fmt0(maxHit)}</td></tr>
+              <tr><th style={th}>Unique Targets Hit</th><td style={td}>{fmt0(targets)}</td></tr>
+              <tr><th style={th}>Abilities Used</th><td style={td}>{fmt0(abilitiesUsed)}</td></tr>
+              <tr><th style={th}>Actions per Minute (APM)</th><td style={td}>{fmt1(apm)}</td></tr>
 
-            <tr><th style={th}>Hit Chance</th><td style={td}>{fmt0(hitCount)} ({fmtPct1(hitChancePct)})</td></tr>
-            <tr><th style={th}>Critical Chance</th><td style={td}>{fmt0(critCount)} ({fmtPct1(critChancePct)})</td></tr>
-            <tr><th style={th}>Strikethrough Chance</th><td style={td}>{fmt0(stCount)} ({fmtPct1(stChancePct)})</td></tr>
+              <tr><th style={th}>Hit Chance</th><td style={td}>{fmt0(hitCount)} ({fmtPct1(hitChancePct)})</td></tr>
+              <tr><th style={th}>Critical Chance</th><td style={td}>{fmt0(critCount)} ({fmtPct1(critChancePct)})</td></tr>
+              <tr><th style={th}>Strikethrough Chance</th><td style={td}>{fmt0(stCount)} ({fmtPct1(stChancePct)})</td></tr>
 
-            <tr><th style={th}>Hit Damage % of Total</th><td style={td}>{fmt0(hitDmg)} {totalDmg ? `(${hitDmgPct.toFixed(1)}%)` : ''}</td></tr>
-            <tr><th style={th}>Critical Damage % of Total</th><td style={td}>{fmt0(critDmg)} {totalDmg ? `(${critDmgPct.toFixed(1)}%)` : ''}</td></tr>
-            <tr><th style={th}>Strikethrough Damage % of Total</th><td style={td}>{fmt0(stDmg)} {totalDmg ? `(${stDmgPct.toFixed(1)}%)` : ''}</td></tr>
-          </tbody>
-        </table>
+              <tr><th style={th}>Hit Damage % of Total</th><td style={td}>{fmt0(hitDmg)} {totalDmg ? `(${hitDmgPct.toFixed(1)}%)` : ''}</td></tr>
+              <tr><th style={th}>Critical Damage % of Total</th><td style={td}>{fmt0(critDmg)} {totalDmg ? `(${critDmgPct.toFixed(1)}%)` : ''}</td></tr>
+              <tr><th style={th}>Strikethrough Damage % of Total</th><td style={td}>{fmt0(stDmg)} {totalDmg ? `(${stDmgPct.toFixed(1)}%)` : ''}</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        {/* Defensive */}
+        <div className="card" style={card}>
+          <h3 style={title}>Defensive Statistics{labelSuffix}</h3>
+          <table className="table" style={{ width:'100%', borderCollapse:'collapse' }}>
+            <tbody>
+              <tr><th style={th}>Damage Taken</th><td style={td}>{fmt0(dmgTaken)}</td></tr>
+              <tr><th style={th}>Damage Taken / min</th><td style={td}>{fmt0(dpmTaken)}</td></tr>
+              <tr><th style={th}>Hits Taken</th><td style={td}>{fmt0(hitsTaken)}</td></tr>
+              <tr><th style={th}>Heals Received</th><td style={td}>{fmt0(healsRecv)}</td></tr>
+              <tr><th style={th}>Self-Healing</th><td style={td}>{fmt0(selfHeal)}</td></tr>
+
+              <tr><th style={th}>Dodge Chance</th><td style={td}>{fmt0(dodgeCount)} ({fmtPct1(dodgeChance)})</td></tr>
+              <tr><th style={th}>Parry Chance</th><td style={td}>{fmt0(parryCount)} ({fmtPct1(parryChance)})</td></tr>
+	      <tr>
+               	<th style={th}>Glancing Blow Chance</th>
+                <td style={td}>{fmt0(glanceCount)} ({fmtPct1(glanceChance)})</td>
+           		   </tr>              
+	      <tr><th style={th}>Block Chance</th><td style={td}>{fmt0(blockCount)} ({fmtPct1(blockChance)})</td></tr>
+              <tr><th style={th}>Total Blocked Amount</th><td style={td}>{fmt0(totalBlocked)}</td></tr>
+              <tr><th style={th}>Average Blocked Amount</th><td style={td}>{fmt0(avgBlocked)}</td></tr>
+              <tr><th style={th}>Average Armor Mitigation</th><td style={td}>{fmtPct1(avgArmorMitigation)}</td></tr>
+
+              {attackers.length > 0 && (
+                <tr>
+                  <th style={{...th, verticalAlign:'top'}}>Top Attackers</th>
+                  <td style={{...td, textAlign:'left'}}>
+                    {attackers.map(([name, dmg]) => (
+                      <div key={name} style={{ display:'flex', justifyContent:'space-between', gap:8 }}>
+                        <span style={{ opacity:0.85 }}>{name}</span>
+                        <span style={{ fontVariantNumeric:'tabular-nums' }}>{fmt0(dmg)}</span>
+                      </div>
+                    ))}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      {/* Defensive */}
-      <div className="card" style={card}>
-        <h3 style={title}>Defensive Statistics{labelSuffix}</h3>
-        <table className="table" style={{ width:'100%', borderCollapse:'collapse' }}>
-          <tbody>
-            <tr><th style={th}>Damage Taken</th><td style={td}>{fmt0(dmgTaken)}</td></tr>
-            <tr><th style={th}>Damage Taken / min</th><td style={td}>{fmt0(dpmTaken)}</td></tr>
-            <tr><th style={th}>Hits Taken</th><td style={td}>{fmt0(hitsTaken)}</td></tr>
-            <tr><th style={th}>Heals Received</th><td style={td}>{fmt0(healsRecv)}</td></tr>
-            <tr><th style={th}>Self-Healing</th><td style={td}>{fmt0(selfHeal)}</td></tr>
-
-            {/* New defensive rows */}
-            <tr><th style={th}>Dodge Chance</th><td style={td}>{fmt0(dodgeCount)} ({fmtPct1(dodgeChance)})</td></tr>
-            <tr><th style={th}>Parry Chance</th><td style={td}>{fmt0(parryCount)} ({fmtPct1(parryChance)})</td></tr>
-            <tr><th style={th}>Block Chance</th><td style={td}>{fmt0(blockCount)} ({fmtPct1(blockChance)})</td></tr>
-            <tr><th style={th}>Total Blocked Amount</th><td style={td}>{fmt0(totalBlocked)}</td></tr>
-            <tr><th style={th}>Average Blocked Amount</th><td style={td}>{fmt0(avgBlocked)}</td></tr>
-            <tr><th style={th}>Average Armor Mitigation</th><td style={td}>{fmtPct1(avgArmorMitigation)}</td></tr>
-
-            {attackers.length > 0 && (
-              <tr>
-                <th style={{...th, verticalAlign:'top'}}>Top Attackers</th>
-                <td style={{...td, textAlign:'left'}}>
-                  {attackers.map(([name, dmg]) => (
-                    <div key={name} style={{ display:'flex', justifyContent:'space-between', gap:8 }}>
-                      <span style={{ opacity:0.85 }}>{name}</span>
-                      <span style={{ fontVariantNumeric:'tabular-nums' }}>{fmt0(dmg)}</span>
-                    </div>
-                  ))}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+      {/* Defense Flow (visual) */}
+      <div className="card" style={{ marginTop:16, gridColumn:'1 / -1', padding:12 }}>
+        <DefenseFlow actor={actor} events={damageEvents} windowStart={windowStart} windowEnd={windowEnd} />
       </div>
-    </div>
+    </>
   );
 }

@@ -10,6 +10,185 @@ import {
 } from "recharts";
 
 
+// --- Star Wars skin as CSS string ---
+const SW_CSS = /* css */ `
+.swg-theme {
+  --bg: #070d1a;
+  --bg2:#0b1426;
+  --panel:#0e1726;
+  --panel-2:#0c1624;
+  --panel-border:#1b2a3d;
+  --glow:#62b0ff;
+  --accent:#21d4fd;
+  --accent2:#ff9d00;
+  --text:#cfe3ff;
+  --muted:#9fb7d8;
+  --grid:#1c2a3f;
+  --good:#19c37d;
+  --warn:#ffcc00;
+  --bad:#ff4d4d;
+  --bg-image: url('/background.jpg');
+  isolation: isolate;
+  min-height: 100vh;
+  color: var(--text);
+  font-family: 'Orbitron', ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+  background:
+    radial-gradient(1200px 800px at 70% -10%, rgba(98,176,255,.20), transparent 60%),
+    radial-gradient(900px 600px at -10% 110%, rgba(98,176,255,.12), transparent 50%),
+    radial-gradient(2px 2px at 20% 30%, rgba(255,255,255,.35) 0, rgba(255,255,255,0) 60%),
+    radial-gradient(1.4px 1.4px at 70% 80%, rgba(255,255,255,.28) 0, rgba(255,255,255,0) 60%),
+    radial-gradient(1.6px 1.6px at 85% 25%, rgba(255,255,255,.28) 0, rgba(255,255,255,0) 60%),
+    linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+  background-attachment: fixed;
+  position: relative;
+}
+
+.swg-theme::after{
+  content:'';
+  position: fixed; inset:0;
+  background-image: var(--bg-image);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: .9;           /* 90% opacity */
+  z-index: -1;           /* behind content but above page bg */
+  pointer-events: none;
+}
+
+@keyframes holo-scan{ from{transform:translateY(0)} to{transform:translateY(3px)} }
+
+.swg-theme .card{
+  background: linear-gradient(180deg, rgba(16,28,50,.96), rgba(12,22,38,.98));
+  border: 1px solid var(--panel-border);
+  box-shadow: 0 0 0 1px rgba(98,176,255,.08) inset, 0 8px 30px rgba(0,0,0,.35), 0 0 24px rgba(98,176,255,.08) inset;
+  border-radius: 14px; backdrop-filter: blur(2px);
+}
+/* -- Solid panel overrides for clearer boxes -- */
+.swg-theme .box,
+.swg-theme .panel,
+.swg-theme .card,
+.swg-theme .table,
+.swg-theme .toolbar,
+.swg-theme .summary {
+  background: linear-gradient(180deg, rgba(16,28,50,.96), rgba(12,22,38,.98)) !important;
+  border: 1px solid rgba(120,170,255,.40);
+  box-shadow: 0 10px 34px rgba(0,0,0,.55), 0 0 0 2px rgba(98,176,255,.12) inset;
+}
+
+.swg-theme .table th,
+.swg-theme .table td {
+  background-color: rgba(12,22,38,.98);
+}
+
+.swg-theme .btn{
+  background: linear-gradient(180deg, rgba(40,80,130,.85), rgba(24,45,80,.85));
+  color:#e9f3ff; border:1px solid rgba(120,170,255,.35); border-radius:10px; padding:6px 10px;
+  text-transform:uppercase; letter-spacing:.06em;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.3) inset, 0 0 12px rgba(98,176,255,.2);
+  transition: transform .06s ease, box-shadow .12s ease, border-color .12s ease;
+}
+.swg-theme .btn:hover{ border-color: var(--accent); box-shadow: 0 0 0 1px rgba(0,0,0,.3) inset, 0 0 18px rgba(98,176,255,.35); }
+.swg-theme .btn:active{ transform: translateY(1px) scale(.99); }
+
+.swg-theme .input, .swg-theme select.input{
+  background: rgba(12,22,38,.85); border:1px solid rgba(120,170,255,.28); color:var(--text);
+  border-radius:10px; padding:6px 8px; outline:none; box-shadow:0 0 0 1px rgba(0,0,0,.3) inset;
+}
+.swg-theme .input:focus{ border-color:var(--accent); box-shadow: 0 0 0 1px rgba(0,0,0,.3) inset, 0 0 0 2px rgba(33,212,253,.18); }
+
+.swg-theme .row{ display:flex; align-items:center; gap:8px; }
+.swg-theme .pill{ background: rgba(98,176,255,.12); color:var(--text); padding:4px 8px; border-radius:999px; font-size:12px; }
+.swg-theme .badge{ background: linear-gradient(180deg, rgba(98,176,255,.18), rgba(98,176,255,.06)); border:1px solid rgba(120,170,255,.35); padding:4px 8px; border-radius:999px; }
+
+.swg-theme .tabbar{ display:flex; gap:8px; margin-top:12px; }
+.swg-theme .tab{
+  background: linear-gradient(180deg, rgba(25,45,80,.8), rgba(16,28,50,.9));
+  color:#bfe1ff; border:1px solid rgba(120,170,255,.3);
+  padding:8px 12px; border-radius:12px; letter-spacing:.08em;
+}
+.swg-theme .tab.active{ border-color:var(--accent); box-shadow: 0 0 0 1px rgba(0,0,0,.35) inset, 0 0 18px rgba(33,212,253,.25); color:#eaf6ff; }
+
+.swg-theme .table{ width:100%; border-collapse:collapse; }
+.swg-theme .table th{
+  text-align:left; font-weight:800; font-size:12px; letter-spacing:.06em; color:#9fb7d8;
+  border-bottom:1px solid var(--panel-border); padding:8px; text-transform:uppercase;
+}
+.swg-theme .table td{ padding:8px; border-bottom:1px solid rgba(27,39,56,.6); }
+.swg-theme .table tr:hover td{ background: rgba(98,176,255,.06); }
+
+.swg-theme .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+.swg-theme .nowrap{ white-space: nowrap; }
+.swg-theme .muted{ color: var(--muted); }
+
+/* --- Recharts tooltip: solid dark HUD panel for readability --- */
+.swg-theme .recharts-tooltip-wrapper { z-index: 1000; }
+.swg-theme .recharts-default-tooltip {
+  background: rgba(10,16,28,.98) !important;
+  border: 1px solid rgba(120,170,255,.45) !important;
+  color: var(--text) !important;
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(0,0,0,.6), 0 0 0 2px rgba(98,176,255,.12) inset;
+  padding: 8px 10px !important;
+}
+.swg-theme .recharts-tooltip-label { 
+  color: #eaf3ff !important; 
+  font-weight: 800; 
+  letter-spacing: .02em; 
+}
+.swg-theme .recharts-tooltip-item { color: var(--text) !important; }
+.swg-theme .recharts-tooltip-item-name { color: var(--muted) !important; }
+.swg-theme .recharts-tooltip-item-value { color: #d8ecff !important; font-weight: 700; }
+`;
+
+
+// ---- Elemental support (injected) ----
+type ElementalBreakdown = Record<string, number>;
+
+// Extend DamageEvent locally if present in this file; otherwise this stays permissive.
+type DamageEventWithElements = DamageEvent & { elements?: ElementalBreakdown };
+
+const titleCase = (s: string) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s);
+const fmtPctElem = (v: number) => (v * 100 >= 99.5 || v === 0 ? (v * 100).toFixed(0) : (v * 100).toFixed(1)) + "%";
+
+function collectAbilityElements(
+  events: DamageEventWithElements[],
+  player: string,
+  abilityNorm: string,
+  winStart: number,
+  winEnd: number
+): ElementalBreakdown {
+  const out: ElementalBreakdown = {};
+  for (const e of (events || [])) {
+    if (!e) continue;
+    const t: number = (e as any).t ?? (e as any).time ?? 0;
+    if (t < winStart || t > winEnd) continue;
+    const src: string = (e as any).src || (e as any).source || "";
+    const abilityName: string = (e as any).ability || "";
+    const canon = typeof canonEntity === "function" ? canonEntity(src) : src;
+    const norm = typeof normalizeAbilityName === "function" ? normalizeAbilityName(abilityName) : abilityName;
+    if (canon !== player) continue;
+    if (norm !== abilityNorm) continue;
+    const elements = (e as any).elements as ElementalBreakdown | undefined;
+    if (!elements) continue;
+    for (const k in elements) {
+      const v = Number((elements as any)[k] || 0);
+      out[k] = (out[k] || 0) + v;
+    }
+  }
+  return out;
+}
+
+function summarizeElements(totals: ElementalBreakdown): { types: string; pct: string } {
+  const entries = Object.entries(totals || {});
+  const total = entries.reduce((s, [,v]) => s + Number(v || 0), 0);
+  if (!total) return { types: "—", pct: "—" };
+  entries.sort((a,b) => Number(b[1]) - Number(a[1]));
+  const types = entries.map(([k]) => titleCase(k)).join(", ");
+  const pct = entries.map(([k,v]) => `${fmtPctElem(Number(v)/total)} ${titleCase(k)}`).join(", ");
+  return { types, pct };
+}
+
+
 /* ========================= Utilities & Types ========================= */
 
 type MetricKey = 'damageDealt'|'avgDps'|'healingDone';
@@ -681,7 +860,9 @@ export default function App(){
   /* -------------------- render -------------------- */
 
   return <ErrorBoundary>
-    <div style={{ minHeight:'100vh', padding:16 }}>
+    <div className="swg-theme">
+      <style dangerouslySetInnerHTML={{ __html: SW_CSS }} />
+      <div style={{ minHeight:'100vh', padding:16 }}>
       <div className="card" style={{ padding:12, marginBottom:12 }}>
         <div className="row">
           <label className="row" style={{gap:8}}>
@@ -850,6 +1031,8 @@ export default function App(){
                   <th>Avg</th>
                   <th>Max</th>
                   <th>% of Player</th>
+    <th>Elemental Type</th>
+    <th>Elemental % of Damage</th>
                 </tr>
               </thead>
 <tbody>
@@ -917,7 +1100,22 @@ export default function App(){
               <td>{fmt0(r.avg)}</td>
               <td>{fmt0(r.max)}</td>
               <td className="muted">{total>0 ? `${(r.damage/total*100).toFixed(1)}%` : '—'}</td>
-            </tr>
+            
+              {/* Elemental columns (injected) */}
+              {(() => {
+                try {
+                  const winStart = timeline?.[0]?.t ?? 0;
+                  const winEnd = timeline?.length ? timeline[timeline.length-1].t : duration ?? 0;
+                  const abilityNorm = typeof normalizeAbilityName === "function" ? normalizeAbilityName(r.ability) : r.ability;
+                  const playerName = (pA || names?.[0] || "");
+                  const elemTotals = collectAbilityElements(damageEvents as any, playerName, abilityNorm, winStart, winEnd);
+                  const { types, pct } = summarizeElements(elemTotals);
+                  return (<><td>{types}</td><td className="nowrap">{pct}</td></>);
+                } catch {
+                  return (<><td>—</td><td>—</td></>);
+                }
+              })()}
+</tr>
           ),
           isOpen ? (
             <tr key={r.ability + ':targets'}>
@@ -1000,6 +1198,7 @@ export default function App(){
         />
       )}
     </div>
+  </div>
   </ErrorBoundary>;
 }
 

@@ -8,9 +8,10 @@ type DamageEvent = {
   ability:string;
   amount:number;
   flags?:string;         // 'hit' | 'crit' | 'glance' | 'strikethrough' | 'periodic' | 'dodge' | 'parry'
-  blocked?: number;      // "(N points blocked)"
-  absorbed?: number;     // "Armor absorbed N points"
-  preMitTotal?: number;  // "... out of T" (pre-mit total)
+  blocked?: number;
+  absorbed?: number;
+  preMitTotal?: number;
+  evadedPct?: number;
 };
 type HealEvent   = { t:number; src:string; dst:string; ability:string; amount:number };
 type PlayerRow   = { name:string; profession?:string; damageDealt:number; healingDone:number; avgDps:number };
@@ -18,42 +19,48 @@ type PlayerRow   = { name:string; profession?:string; damageDealt:number; healin
 type PerAbility = Record<string, Record<string, { hits:number; dmg:number; max:number }>>;
 type PerAbilityTargets = Record<string, Record<string, Record<string, { hits:number; dmg:number; max:number }>>>;
 
+// NEW: per-defender tallies used for defensive stats
+type PerDefenderStats = Record<string, {
+  // Landed split
+  hits: number;              // landed, non-periodic, NON-glance
+  glances: number;           // count of glancing blows taken
+  glanceDamageSum: number;   // sum of glancing damage amounts
+
+  // NEW: avoid/attempts tallies (to mirror Defense Flow math)
+  dodges: number;            // number of dodge outcomes vs this defender
+  parries: number;           // number of parry outcomes vs this defender
+}>;
+
 // ---------- Timestamp ----------
 const T_TIME = /^(?:\[\s*Combat\s*\]\s*)?(\d{2}):(\d{2}):(\d{2})\s+/i;
 const toSec = (hh:string, mm:string, ss:string) => (+hh)*3600 + (+mm)*60 + (+ss);
 
 // ---------- Event regexes ----------
 const RX_DMG_WITH =
-  /^(.+?)\s+attacks\s+(.+?)\s+(?:with|using)\s+(.+?)\s+(?:and\s+)?(?:(crits|hits|glances|strikes\s+through)(?:\s*\(\d+%.*?\))?)?\s*for\s+(\d+)\s+points/i;
+  /^(.+?)\s+attacks\s+(.+?)\s+(?:with|using)\s+(.+?)\s+(?:and\s+)?(?:(crits|hits|glances|strikes\s+through)(?:\s*\((\d+)\s*%(?:\s*evaded)?\))?)?\s*for\s+(\d+)\s+points/i;
 
 const RX_DMG_BARE =
-  /^(.+?)\s+attacks\s+(.+?)\s+(?:and\s+)?(?:(crits|hits|glances|strikes\s+through)(?:\s*\(\d+%.*?\))?)?\s*for\s+(\d+)\s+points/i;
+  /^(.+?)\s+attacks\s+(.+?)\s+(?:and\s+)?(?:(crits|hits|glances|strikes\s+through)(?:\s*\((\d+)\s*%(?:\s*evaded)?\))?)?\s*for\s+(\d+)\s+points/i;
 
-const RX_DMG_GENERIC= /^(.+?)\s+damages\s+(.+?)\s+for\s+(\d+)\s+points(?:\s+(?:with|using)\s+(.+?))?$/i;
-const RX_DMG_DOT    = /^(.+?)\s+suffers\s+(\d+)\s+points\s+of\s+damage\s+from\s+(.+?)\s+over\s+time/i;
+const RX_DMG_GENERIC = /^(.+?)\s+damages\s+(.+?)\s+for\s+(\d+)\s+points(?:\s+(?:with|using)\s+(.+?))?$/i;
+const RX_DMG_DOT     = /^(.+?)\s+suffers\s+(\d+)\s+points\s+of\s+damage\s+from\s+(.+?)\s+over\s+time/i;
+const RX_DMG_CAUSED  = /^(.+?)\s+(?:has\s+)?caused\s+(.+?)\s+to\s+take\s+(\d+)\s+points\s+(?:of\s+([A-Za-z '\-]+?)\s+)?damage\b.*$/i;
 
-// NEW periodic style
-const RX_DMG_CAUSED = /^(.+?)\s+(?:has\s+)?caused\s+(.+?)\s+to\s+take\s+(\d+)\s+points\s+(?:of\s+([A-Za-z '\-]+?)\s+)?damage\b.*$/i;
-
-// ---------- Defensive outcomes (expanded coverage) ----------
-// "...attacks ... [with|using ...] and misses (dodge|parry)."
+// ---------- Defensive outcomes ----------
 const RX_MISSES_PAREN =
   /^(.+?)\s+attacks\s+(.+?)(?:\s+(?:with|using)\s+.+?)?\s+(?:and\s+)?misses\s*\((dodge|parry|parries)\)\.?$/i;
 
-// "Amero attacks Beefy using X but/and Beefy dodges/parries"
-const RX_DODGE_PARRY_1 = /^(.+?)\s+attacks\s+(.+?)\s+(?:with|using)\s+.*?(?:,?\s+)?(?:but|and)\s+\2\s+(dodges|parries)\b/i;
-// "Amero attacks Beefy but/and Beefy dodges/parries"
-const RX_DODGE_PARRY_2 = /^(.+?)\s+attacks\s+(.+?)(?:\s+(?:but|and))\s+\2\s+(dodges|parries)\b/i;
-// "Beefy dodges/parries Amero's attack"
-const RX_DODGE_PARRY_3 = /^(.+?)\s+(dodges|parries)\s+(.+?)'?s?\s+attack\b/i;
-// "Amero's attack is/was dodged/parried by Beefy"
-const RX_DODGE_PARRY_4 = /^(.+?)'?s?\s+attack\s+(?:is|was)\s+(dodged|parried)\s+by\s+(.+?)\b/i;
+const RX_DODGE_PARRY_1  = /^(.+?)\s+attacks\s+(.+?)\s+(?:with|using)\s+.*?(?:,?\s+)?(?:but|and)\s+\2\s+(dodges|parries)\b/i;
+const RX_DODGE_PARRY_2  = /^(.+?)\s+attacks\s+(.+?)(?:\s+(?:but|and))\s+\2\s+(dodges|parries)\b/i;
+const RX_DODGE_PARRY_3  = /^(.+?)\s+(dodges|parries)\s+(.+?)'?s?\s+attack\b/i;
+const RX_DODGE_PARRY_4  = /^(.+?)'?s?\s+attack\s+(?:is|was)\s+(dodged|parried)\s+by\s+(.+?)\b/i;
 
 const RX_HEAL = /^(.+?)\s+heals\s+(.+?)\s+for\s+(\d+)\s+points(?:\s+with\s+(.+))?/i;
 
-// Helpers to extract block & armor-absorb from the full line
+// Helpers
 const RX_POINTS_BLOCKED = /\((\d+)\s+points\s+blocked\)/i;
 const RX_ARMOR_ABSORB   = /Armor\s+absorbed\s+(\d+)\s+points\s+out\s+of\s+(\d+)/i;
+const RX_EVADED_PCT     = /\((\d+)\s*%(?:\s*evaded)?\)/i;
 
 // ---------- Normalizers ----------
 function clean(s?:string){ return (s||'').trim(); }
@@ -71,8 +78,18 @@ function normalizeAbilityName(raw?: string): string {
 }
 
 // ---------- Alias merge (players only; NPCs preserved) ----------
-const NPC_PREFIXES = ["A ", "An ", "The "];
-function looksLikeNPC(name: string){ return NPC_PREFIXES.some(p => name.startsWith(p)); }
+const RX_NPC_PREFIX = /^(?:a|an|the)\s+/i;
+function looksLikeNPC(name: string) { return RX_NPC_PREFIX.test((name || '').trim()); }
+function canonicalizeNPCName(name: string) {
+  let s = (name || '').trim().replace(/\s+/g, " ");
+  const m = s.match(RX_NPC_PREFIX);
+  if (m) {
+    const art = m[0].trim().toLowerCase();
+    const cap = art === "a" ? "A " : art === "an" ? "An " : "The ";
+    s = cap + s.slice(m[0].length);
+  }
+  return s;
+}
 
 const DEFAULT_ALIASES: Record<string,string> = {
   "Shepard EffectMass": "Shepard",
@@ -85,20 +102,21 @@ function stripJunk(s: string): string {
   return t;
 }
 
-function normalizeActorAlias(raw: string, seen: Set<string>, aliases: Record<string,string> = DEFAULT_ALIASES): string {
+function normalizeActorAlias(
+  raw: string,
+  seen: Set<string>,
+  aliases: Record<string,string> = DEFAULT_ALIASES
+): string {
   const original = stripJunk(raw);
   if (!original) return "";
-
   if (aliases[original]) return aliases[original];
-  if (looksLikeNPC(original)) return original;
+  if (looksLikeNPC(original)) return canonicalizeNPCName(original);
 
   const m = original.match(/^(.+?)\s+([A-Za-z][\w'-]+)$/);
   if (m) {
     const base = m[1];
     const suffix = m[2];
-    if (/^[A-Z][A-Za-z'-]*$/.test(suffix) && seen.has(base)) {
-      return base;
-    }
+    if (/^[A-Z][A-Za-z'-]*$/.test(suffix) && seen.has(base)) return base;
   }
   return original;
 }
@@ -107,7 +125,6 @@ function normalizeActorAlias(raw: string, seen: Set<string>, aliases: Record<str
 self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>{
   const { text, collectUnparsed } = ev.data || { text:'' };
 
-  // Normalize newlines and DE-DUPE only *consecutive* exact duplicates.
   const rawLines = (text||'').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
 
   function dedupeConsecutive(arr: string[]): { lines: string[]; removed: number } {
@@ -115,9 +132,9 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
     let prevKey: string | undefined;
     let removed = 0;
     for (const ln of arr) {
-      if (!ln) continue; // drop empty
-      const key = ln.replace(/\s+$/,''); // ignore trailing whitespace only
-      if (key === prevKey) { removed++; continue; } // drop only if same as immediate previous
+      if (!ln) continue;
+      const key = ln.replace(/\s+$/,'');
+      if (key === prevKey) { removed++; continue; }
       out.push(ln);
       prevKey = key;
     }
@@ -146,6 +163,17 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
   const seenActors = new Set<string>();
   const aliasMap = DEFAULT_ALIASES;
 
+  // NEW: defensive tallies per defender
+  const perDef: PerDefenderStats = {};
+
+  function ensureDef(name:string){
+    if (!perDef[name]) perDef[name] = {
+      hits:0, glances:0, glanceDamageSum:0,
+      dodges:0, parries:0,            // NEW
+    };
+    return perDef[name];
+  }
+
   function pushDamage(
     t:number,
     src:string,
@@ -155,7 +183,8 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
     flags?:string,
     blocked?:number,
     absorbed?:number,
-    preMitTotal?:number
+    preMitTotal?:number,
+    evadedPct?:number
   ){
     const abilityKey = normalizeAbilityName(abilityRaw || 'attack');
 
@@ -163,10 +192,10 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       t, src, dst,
       ability: abilityRaw || abilityKey || 'attack',
       amount, flags,
-      blocked, absorbed, preMitTotal
+      blocked, absorbed, preMitTotal,
+      evadedPct
     });
 
-    // Only real damage contributes to DPS/aggregates
     if (amount > 0) {
       if (!dpsByActor[src]) dpsByActor[src] = [];
       dpsByActor[src][t] = (dpsByActor[src][t]||0) + amount;
@@ -184,10 +213,19 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
         perTaken[dst] = (perTaken[dst]||0) + amount;
         if (!perTakenBy[dst]) perTakenBy[dst] = {};
         perTakenBy[dst][src] = (perTakenBy[dst][src]||0) + amount;
+
+        // NEW: per-defender tallies for “Hits Taken” and “Glances”
+        const d = ensureDef(dst);
+        if (flags === 'glance') {
+          d.glances += 1;
+          d.glanceDamageSum += amount; // e.g., "glances for 837 points"
+        } else if (flags !== 'periodic') {
+          // Count landed, non-periodic, non-glance hits (hit/crit/strikethrough/undefined)
+          d.hits += 1;
+        }
       }
     }
 
-    // Remember last caster for DoT attribution
     if (!flags && abilityKey) {
       lastCasterForDot[`${abilityKey}||${dst}`] = src;
     }
@@ -195,6 +233,12 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
 
   function pushOutcome(t:number, src:string, dst:string, flag:'dodge'|'parry'){
     damageEvents.push({ t, src, dst, ability: 'attack', amount: 0, flags: flag });
+    // NEW: track dodge/parry counts by defender to compute attempts-based chances
+    if (src !== dst) {
+      const d = ensureDef(dst);
+      if (flag === 'dodge') d.dodges += 1;
+      else d.parries += 1;
+    }
   }
 
   function pushHeal(t:number, src:string, dst:string, abilityRaw:string, amount:number){
@@ -232,7 +276,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       return { src, dst };
     };
 
-    // ---------- Defensive outcomes: "misses (dodge|parry)" ----------
+    // Defensive outcomes
     if ((m = RX_MISSES_PAREN.exec(rest))) {
       const { src, dst } = normNames(m[1], m[2]);
       const kind = (m[3] || '').toLowerCase();
@@ -242,8 +286,6 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
         parsed++; continue;
       }
     }
-
-    // ---------- Defensive outcomes (other phrasings) ----------
     if ((m = RX_DODGE_PARRY_1.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);
       const flag = (m[3]||'').toLowerCase() as 'dodges'|'parries';
@@ -267,7 +309,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       if (src && dst) { pushOutcome(t, src, dst, flagPast === 'dodged' ? 'dodge' : 'parry'); parsed++; continue; }
     }
 
-    // Helpers for block/absorb on damage lines
+    // Block/absorb helpers
     const blockedMatch = rest.match(RX_POINTS_BLOCKED);
     const blockedAmt = blockedMatch ? +blockedMatch[1] : undefined;
 
@@ -275,11 +317,33 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
     const absorbedAmt = absorbMatch ? +absorbMatch[1] : undefined;
     const preMitTotal = absorbMatch ? +absorbMatch[2] : undefined;
 
-    // ---------- Damage parsing ----------
+    const evadedScan = rest.match(RX_EVADED_PCT);
+    const evadedFromScan = evadedScan ? +evadedScan[1] : undefined;
+
+    // Damage parsing
     if ((m = RX_DMG_WITH.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);
       const ability = clean(m[3]);
       const kindRaw = (m[4]||'').toLowerCase().replace(/\s+/g,' ');
+      const evadedPct = m[5] ? +m[5] : evadedFromScan;
+      const amount = +m[6];
+
+      const flag =
+        kindRaw === 'crits' ? 'crit' :
+        kindRaw === 'hits' ? 'hit' :
+        kindRaw === 'glances' ? 'glance' :
+        kindRaw.startsWith('strikes through') ? 'strikethrough' : undefined;
+
+      if (src){
+        pushDamage(t, src, dst, ability, amount, flag, blockedAmt, absorbedAmt, preMitTotal, evadedPct);
+        parsed++; continue;
+      }
+    }
+
+    if ((m = RX_DMG_BARE.exec(rest))){
+      const { src, dst } = normNames(m[1], m[2]);
+      const kindRaw = (m[3]||'').toLowerCase().replace(/\s+/g,' ');
+      const evadedPct = m[4] ? +m[4] : evadedFromScan;
       const amount = +m[5];
 
       const flag =
@@ -289,24 +353,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
         kindRaw.startsWith('strikes through') ? 'strikethrough' : undefined;
 
       if (src){
-        pushDamage(t, src, dst, ability, amount, flag, blockedAmt, absorbedAmt, preMitTotal);
-        parsed++; continue;
-      }
-    }
-
-    if ((m = RX_DMG_BARE.exec(rest))){
-      const { src, dst } = normNames(m[1], m[2]);
-      const kindRaw = (m[3]||'').toLowerCase().replace(/\s+/g,' ');
-      const amount = +m[4];
-
-      const flag =
-        kindRaw === 'crits' ? 'crit' :
-        kindRaw === 'hits' ? 'hit' :
-        kindRaw === 'glances' ? 'glance' :
-        kindRaw.startsWith('strikes through') ? 'strikethrough' : undefined;
-
-      if (src){
-        pushDamage(t, src, dst, 'attack', amount, flag, blockedAmt, absorbedAmt, preMitTotal);
+        pushDamage(t, src, dst, 'attack', amount, flag, blockedAmt, absorbedAmt, preMitTotal, evadedPct);
         parsed++; continue;
       }
     }
@@ -316,12 +363,12 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       const amount = +m[3];
       const ability = clean(m[4]||'attack');
       if (src){
-        pushDamage(t, src, dst, ability, amount, undefined, blockedAmt, absorbedAmt, preMitTotal);
+        pushDamage(t, src, dst, ability, amount, undefined, blockedAmt, absorbedAmt, preMitTotal, evadedFromScan);
         parsed++; continue;
       }
     }
 
-    // periodic forms
+    // periodic
     if ((m = RX_DMG_DOT.exec(rest))){
       const dstNormOnly = normalizeActorAlias(clean(m[1]), seenActors, aliasMap);
       if (dstNormOnly && !looksLikeNPC(dstNormOnly)) seenActors.add(dstNormOnly);
@@ -341,7 +388,7 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
       if (src){ pushDamage(t, src, dst, dtype, amount, 'periodic'); parsed++; continue; }
     }
 
-    // ---------- Healing ----------
+    // Healing
     if ((m = RX_HEAL.exec(rest))){
       const { src, dst } = normNames(m[1], m[2]);
       const amount = +m[3]; const ability = clean(m[4]||'');
@@ -368,6 +415,43 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
     rows.push({ name:a, damageDealt:d, healingDone:h, avgDps: d/Math.max(1,maxAbs) });
   }
 
+  // NEW: derive per-defender defensive metrics ready for UI
+  const defenseDerived: Record<string, {
+    // existing glancing numbers
+    hitsTaken: number;          // non-glance landed
+    glanceCount: number;
+    glanceChancePct: number;
+    avgGlance: number;
+
+    // NEW: attempts-based numbers to mirror Defense Flow
+    attempts: number;
+    dodgeCount: number;
+    parryCount: number;
+    dodgeChancePct: number;     // dodges / attempts
+    parryChancePct: number;     // parries / attempts
+  }> = {};
+
+  for (const [defender, v] of Object.entries(perDef)) {
+    const landedTotal = v.hits + v.glances;                  // equals Flow's "Landed"
+    const attempts     = landedTotal + v.dodges + v.parries; // Flow math
+    const denomGlance  = v.hits + v.glances;                 // as you specified for Glance %
+
+    defenseDerived[defender] = {
+      // glancing
+      hitsTaken: v.hits,
+      glanceCount: v.glances,
+      glanceChancePct: denomGlance ? (v.glances / denomGlance) * 100 : 0,
+      avgGlance: v.glances ? (v.glanceDamageSum / v.glances) : 0,
+
+      // attempts-based chances
+      attempts,
+      dodgeCount: v.dodges,
+      parryCount: v.parries,
+      dodgeChancePct: attempts ? (v.dodges / attempts) * 100 : 0,
+      parryChancePct: attempts ? (v.parries / attempts) * 100 : 0,
+    };
+  }
+
   const payload = {
     rows,
     tl,
@@ -376,12 +460,14 @@ self.onmessage = (ev: MessageEvent<{ text:string; collectUnparsed?:boolean }>)=>
     perAbilityTargets,
     perTaken,
     perTakenBy,
+    defense: perDef,            // raw tallies
+    defenseDerived,             // ready-to-render numbers (Flow-consistent)
     duration: maxAbs,
     debug: {
       parsed,
-      totalLines: rawLines.length,   // before de-dupe
-      uniqueLines: lines.length,     // after consecutive de-dupe
-      duplicatesDropped,             // number removed
+      totalLines: rawLines.length,
+      uniqueLines: lines.length,
+      duplicatesDropped,
       duration: maxAbs,
       unparsed: collectUnparsed ? unparsed.length : 0
     },

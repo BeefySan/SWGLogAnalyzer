@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback, useTransition, useDeferredValue } from "react";
 import ErrorBoundary from "./ErrorBoundary";
+import DpsPopoutButton from "./components/DpsPopoutButton";
 import { ResponsiveContainer, AreaChart, Area, LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip, Legend, BarChart, Bar, LabelList, Cell, Sankey, ReferenceLine, ReferenceArea } from "recharts";
 
 // --- Bigger, centered label for death-flag ReferenceLines ---
@@ -678,6 +679,24 @@ const resetWindow = useCallback(() => {
 
 
   /* -------------------- worker / parsing -------------------- */
+// Popout-only: fresh worker factory so the popout can parse independently
+function makeWorkerForPopout(): Worker {
+  try {
+    // Preferred: module worker via URL
+    return new Worker(new URL('./parser.worker.ts', import.meta.url), { type: 'module' });
+  } catch (e) {
+    // Fallback for Vite: ?worker import
+    try {
+      // @ts-ignore
+      const WorkerCtor = (window as any).__SWG_WORKER_CTOR__;
+      if (WorkerCtor) return new WorkerCtor();
+    } catch {}
+  }
+  // Last resort: dynamic import (async), but our popout expects sync.
+  // If you hit this, add: window.__SWG_WORKER_CTOR__ = (await import('./parser.worker.ts?worker')).default;
+  throw new Error('Unable to construct parser worker for popout');
+}
+
   
 async function ensureWorker(): Promise<Worker>{
     if (workerRef.current) return workerRef.current;
@@ -973,6 +992,18 @@ w.onmessage = (ev:any)=>{
   const windowStart = useMemo(() => (timeline[0]?.t ?? (baseTimeline[0]?.t ?? 0)), [timeline, baseTimeline]);
   const windowEnd   = useMemo(() => (timeline.length ? timeline[timeline.length-1].t : (baseTimeline.length ? baseTimeline[baseTimeline.length-1].t : duration)), [timeline, baseTimeline, duration]);
 /* -------------------- selectors & memo -------------------- */
+// Selected player helper (A if set, else first in current rows). Return null for "all players".
+function getSelectedPlayerForPopout(): string | null {
+  // If comparison is on and A is chosen, use that; otherwise default to top row
+  try {
+    if (compareOn && pA) return pA || null;
+  } catch {}
+  try {
+    return (rows && rows[0] && rows[0].name) ? rows[0].name : null;
+  } catch {}
+  return null;
+}
+
 
   // Alphabetize and de-duplicate the comparison dropdown
   const names = useMemo(()=>{
@@ -1089,6 +1120,7 @@ const deathFlags = useMemo(() => {
             <span style={{opacity:.8,fontWeight:700}}>Upload SWG chatlog.txt</span>
             <input className="input" type="file" accept=".txt,.log" onChange={(e)=>onChoose(e.target.files)} />
           </label>
+          <DpsPopoutButton getSelectedPlayer={getSelectedPlayerForPopout} makeWorker={makeWorkerForPopout} />
 
           <span style={{opacity:.8,fontWeight:700}}>Metric:</span>
           <select className="input" value={metric} onChange={(e)=>setMetric(e.target.value as MetricKey)}>

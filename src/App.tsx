@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback, useTransition, useDeferredValue } from "react";
+import { useRafHover } from "./hooks/useRafHover";
+import { TimelineHoverOverlay } from "./components/TimelineHoverOverlay";
 import ErrorBoundary from "./ErrorBoundary";
 import DpsPopoutButton from "./components/DpsPopoutButton";
 import { ResponsiveContainer, AreaChart, Area, LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip, Legend, BarChart, Bar, LabelList, Cell, Sankey, ReferenceLine, ReferenceArea } from "recharts";
@@ -655,7 +657,29 @@ const resetWindow = useCallback(() => {
   const [selecting, setSelecting] = useState<{x0:number, x1:number} | null>(null);
   const [hoverX, setHoverX] = useState<number | null>(null);
 
-  const clampToActive = useCallback((start:number, end:number)=>{
+  
+  const timelineRef = useRef<HTMLDivElement>(null);
+
+  // Prevent re-render storms: only update hoverX while selecting
+  const setHoverXThrottled = (x: number | null) => {
+    if (selecting) setHoverXThrottled(x);
+  };
+
+  // rAF-driven hover overlay
+  useRafHover(timelineRef, {
+    xToTime: (px) => {
+      const w = timelineRef.current?.getBoundingClientRect().width || 1;
+      return windowStart + (px / w) * (windowEnd - windowStart);
+    },
+    times: (timeline ?? []).map((p: any) => p.t),
+    onUpdate: ({ x, time }) => {
+      timelineRef.current?.dispatchEvent(
+        new CustomEvent("timeline-hover-update", { detail: { x, label: toMMSS(time) } })
+      );
+    },
+    minDeltaPx: 1,
+  });
+const clampToActive = useCallback((start:number, end:number)=>{
     if (segIndex >= 0 && segments[segIndex]) {
       const seg = segments[segIndex];
       const s = Math.max(seg.start, Math.min(start, end));
@@ -1184,9 +1208,9 @@ const deathFlags = useMemo(() => {
 </div>
         </div>
 
-        <div style={{ padding:0, height:420, width:'100%' }}>
+        <div ref={timelineRef} style={{ position:'relative', padding:0, height:420, width:'100%' }}>
           <ResponsiveContainer width="100%" height="100%" debounce={200}>
-            <LineChart onMouseDown={(e:any)=>{ if(!e||e.activeLabel==null)return; setSelecting({x0:Number(e.activeLabel),x1:Number(e.activeLabel)}); }} onMouseMove={(e:any)=>{ if(e&&e.activeLabel!=null) setHoverX(Number(e.activeLabel)); if(!selecting||!e||e.activeLabel==null) return; setSelecting(s=>s?({...s,x1:Number(e.activeLabel)}):s); }} onMouseUp={(e:any)=>{ if(!selecting) return; const {x0,x1}=selecting; setSelecting(null); if(Math.abs(x1-x0)>=1) commitWindow(x0,x1); }} onMouseLeave={()=> setHoverX(null)} onDoubleClick={()=> resetWindow()} data={top10Data} margin={{ top: 8, right: 20, left: 0, bottom: 0 }}>
+            <LineChart onMouseDown={(e:any)=>{ if(!e||e.activeLabel==null)return; setSelecting({x0:Number(e.activeLabel),x1:Number(e.activeLabel)}); }} onMouseMove={(e:any)=>{ if(e&&e.activeLabel!=null) setHoverXThrottled(Number(e.activeLabel)); if(!selecting||!e||e.activeLabel==null) return; setSelecting(s=>s?({...s,x1:Number(e.activeLabel)}):s); }} onMouseUp={(e:any)=>{ if(!selecting) return; const {x0,x1}=selecting; setSelecting(null); if(Math.abs(x1-x0)>=1) commitWindow(x0,x1); }} onMouseLeave={()=> setHoverXThrottled(null)} onDoubleClick={()=> resetWindow()} data={top10Data} margin={{ top: 8, right: 20, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="#1c2a3f" strokeDasharray="2 4" />
               <XAxis
                 dataKey="t"
@@ -1275,14 +1299,9 @@ const deathFlags = useMemo(() => {
     fill="rgba(33,212,253,0.12)"
   />
 )}
-{hoverX != null && !selecting && (
-  <ReferenceLine x={hoverX} stroke="#62b0ff" strokeDasharray="3 3" />
-)}
-
-{selecting && (<ReferenceArea x1={Math.max(selecting.x0, selecting.x1)} x2={Math.min(selecting.x0, selecting.x1)} strokeOpacity={0} fill="rgba(33,212,253,0.12)" />)}
-{hoverX != null && !selecting && (<ReferenceLine x={hoverX} stroke="#62b0ff" strokeDasharray="3 3" />)}
 </LineChart>
           </ResponsiveContainer>
+  <TimelineHoverOverlay containerRef={timelineRef} />
         </div>
       </div>
 

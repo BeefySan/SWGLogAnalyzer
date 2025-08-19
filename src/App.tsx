@@ -1,6 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback, useTransition, useDeferredValue } from "react";
-import { useRafHover } from "./hooks/useRafHover";
-import { TimelineHoverOverlay } from "./components/TimelineHoverOverlay";
 import ErrorBoundary from "./ErrorBoundary";
 import DpsPopoutButton from "./components/DpsPopoutButton";
 import { ResponsiveContainer, AreaChart, Area, LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip, Legend, BarChart, Bar, LabelList, Cell, Sankey, ReferenceLine, ReferenceArea } from "recharts";
@@ -657,29 +655,7 @@ const resetWindow = useCallback(() => {
   const [selecting, setSelecting] = useState<{x0:number, x1:number} | null>(null);
   const [hoverX, setHoverX] = useState<number | null>(null);
 
-  
-  const timelineRef = useRef<HTMLDivElement>(null);
-
-  // Prevent re-render storms: only update hoverX while selecting
-  const setHoverXThrottled = (x: number | null) => {
-    if (selecting) setHoverXThrottled(x);
-  };
-
-  // rAF-driven hover overlay
-  useRafHover(timelineRef, {
-    xToTime: (px) => {
-      const w = timelineRef.current?.getBoundingClientRect().width || 1;
-      return windowStart + (px / w) * (windowEnd - windowStart);
-    },
-    times: (timeline ?? []).map((p: any) => p.t),
-    onUpdate: ({ x, time }) => {
-      timelineRef.current?.dispatchEvent(
-        new CustomEvent("timeline-hover-update", { detail: { x, label: toMMSS(time) } })
-      );
-    },
-    minDeltaPx: 1,
-  });
-const clampToActive = useCallback((start:number, end:number)=>{
+  const clampToActive = useCallback((start:number, end:number)=>{
     if (segIndex >= 0 && segments[segIndex]) {
       const seg = segments[segIndex];
       const s = Math.max(seg.start, Math.min(start, end));
@@ -703,24 +679,6 @@ const clampToActive = useCallback((start:number, end:number)=>{
 
 
   /* -------------------- worker / parsing -------------------- */
-// Popout-only: fresh worker factory so the popout can parse independently
-function makeWorkerForPopout(): Worker {
-  try {
-    // Preferred: module worker via URL
-    return new Worker(new URL('./parser.worker.ts', import.meta.url), { type: 'module' });
-  } catch (e) {
-    // Fallback for Vite: ?worker import
-    try {
-      // @ts-ignore
-      const WorkerCtor = (window as any).__SWG_WORKER_CTOR__;
-      if (WorkerCtor) return new WorkerCtor();
-    } catch {}
-  }
-  // Last resort: dynamic import (async), but our popout expects sync.
-  // If you hit this, add: window.__SWG_WORKER_CTOR__ = (await import('./parser.worker.ts?worker')).default;
-  throw new Error('Unable to construct parser worker for popout');
-}
-
   
 async function ensureWorker(): Promise<Worker>{
     if (workerRef.current) return workerRef.current;
@@ -1016,18 +974,6 @@ w.onmessage = (ev:any)=>{
   const windowStart = useMemo(() => (timeline[0]?.t ?? (baseTimeline[0]?.t ?? 0)), [timeline, baseTimeline]);
   const windowEnd   = useMemo(() => (timeline.length ? timeline[timeline.length-1].t : (baseTimeline.length ? baseTimeline[baseTimeline.length-1].t : duration)), [timeline, baseTimeline, duration]);
 /* -------------------- selectors & memo -------------------- */
-// Selected player helper (A if set, else first in current rows). Return null for "all players".
-function getSelectedPlayerForPopout(): string | null {
-  // If comparison is on and A is chosen, use that; otherwise default to top row
-  try {
-    if (compareOn && pA) return pA || null;
-  } catch {}
-  try {
-    return (rows && rows[0] && rows[0].name) ? rows[0].name : null;
-  } catch {}
-  return null;
-}
-
 
   // Alphabetize and de-duplicate the comparison dropdown
   const names = useMemo(()=>{
@@ -1144,7 +1090,6 @@ const deathFlags = useMemo(() => {
             <span style={{opacity:.8,fontWeight:700}}>Upload SWG chatlog.txt</span>
             <input className="input" type="file" accept=".txt,.log" onChange={(e)=>onChoose(e.target.files)} />
           </label>
-          <DpsPopoutButton getSelectedPlayer={getSelectedPlayerForPopout} makeWorker={makeWorkerForPopout} />
 
           <span style={{opacity:.8,fontWeight:700}}>Metric:</span>
           <select className="input" value={metric} onChange={(e)=>setMetric(e.target.value as MetricKey)}>
@@ -1171,6 +1116,7 @@ const deathFlags = useMemo(() => {
             {names.map(n=> <option key={'B'+n} value={n}>{n}</option>)}
           </select>
           <button className="btn" disabled={!compareOn} onClick={()=>{ setPA(''); setPB(''); }}>Clear A/B</button>
+          <DpsPopoutButton makeWorker={() => new Worker(new URL('./parser.worker.ts', import.meta.url), { type: 'module' })} />
 
           {parsing && <span className="badge">Parsing… <progress max={parsing.total} value={parsing.done}></progress> {fmt0(parsing.done)}/{fmt0(parsing.total)}</span>}
         </div>
@@ -1208,9 +1154,9 @@ const deathFlags = useMemo(() => {
 </div>
         </div>
 
-        <div ref={timelineRef} style={{ position:'relative', padding:0, height:420, width:'100%' }}>
+        <div style={{ padding:0, height:420, width:'100%' }}>
           <ResponsiveContainer width="100%" height="100%" debounce={200}>
-            <LineChart onMouseDown={(e:any)=>{ if(!e||e.activeLabel==null)return; setSelecting({x0:Number(e.activeLabel),x1:Number(e.activeLabel)}); }} onMouseMove={(e:any)=>{ if(e&&e.activeLabel!=null) setHoverXThrottled(Number(e.activeLabel)); if(!selecting||!e||e.activeLabel==null) return; setSelecting(s=>s?({...s,x1:Number(e.activeLabel)}):s); }} onMouseUp={(e:any)=>{ if(!selecting) return; const {x0,x1}=selecting; setSelecting(null); if(Math.abs(x1-x0)>=1) commitWindow(x0,x1); }} onMouseLeave={()=> setHoverXThrottled(null)} onDoubleClick={()=> resetWindow()} data={top10Data} margin={{ top: 8, right: 20, left: 0, bottom: 0 }}>
+            <LineChart onMouseDown={(e:any)=>{ if(!e||e.activeLabel==null)return; setSelecting({x0:Number(e.activeLabel),x1:Number(e.activeLabel)}); }} onMouseMove={(e:any)=>{ if(e&&e.activeLabel!=null) setHoverX(Number(e.activeLabel)); if(!selecting||!e||e.activeLabel==null) return; setSelecting(s=>s?({...s,x1:Number(e.activeLabel)}):s); }} onMouseUp={(e:any)=>{ if(!selecting) return; const {x0,x1}=selecting; setSelecting(null); if(Math.abs(x1-x0)>=1) commitWindow(x0,x1); }} onMouseLeave={()=> setHoverX(null)} onDoubleClick={()=> resetWindow()} data={top10Data} margin={{ top: 8, right: 20, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="#1c2a3f" strokeDasharray="2 4" />
               <XAxis
                 dataKey="t"
@@ -1299,9 +1245,14 @@ const deathFlags = useMemo(() => {
     fill="rgba(33,212,253,0.12)"
   />
 )}
+{hoverX != null && !selecting && (
+  <ReferenceLine x={hoverX} stroke="#62b0ff" strokeDasharray="3 3" />
+)}
+
+{selecting && (<ReferenceArea x1={Math.max(selecting.x0, selecting.x1)} x2={Math.min(selecting.x0, selecting.x1)} strokeOpacity={0} fill="rgba(33,212,253,0.12)" />)}
+{hoverX != null && !selecting && (<ReferenceLine x={hoverX} stroke="#62b0ff" strokeDasharray="3 3" />)}
 </LineChart>
           </ResponsiveContainer>
-  <TimelineHoverOverlay containerRef={timelineRef} />
         </div>
       </div>
 

@@ -214,15 +214,47 @@ function normalizeActorAlias(
 ): string {
   const original = stripJunk(raw);
   if (!original) return "";
-  if (aliases[original]) return aliases[original];
-  if (looksLikeNPC(original)) return canonicalizeNPCName(original);
 
+  // Case-insensitive alias lookup
+  const lc = original.toLowerCase();
+  if (aliases[original]) return aliases[original];
+  if (aliases[lc]) return aliases[lc];
+
+  if (looksLikeNPC(original)) {
+    const canon = canonicalizeNPCName(original);
+    aliases[lc] = canon;
+    return canon;
+  }
+
+  // Collapse "<Base> Effect*" synthetic sources to Base (e.g., "Shepard EffectMass" → "Shepard")
+  const mEffect = original.match(/^([A-Za-z][\w'\-]*)\s+(Effect[\w'-]*)$/i);
+  if (mEffect) {
+    const baseRaw = mEffect[1];
+    const baseLc = baseRaw.toLowerCase();
+    // If we've seen a canonical capitalization for this actor, reuse it
+    const existing = aliases[baseLc] || Array.from(seen).find(n => n.toLowerCase() === baseLc);
+    const canon = existing || baseRaw;
+    aliases[original] = canon;
+    aliases[lc] = canon;
+    aliases[baseLc] = canon;
+    return canon;
+  }
+
+  // If the name looks like "<First> <Suffix>" and we've already seen "<First>" (any case), collapse to "<First>"
   const m = original.match(/^(.+?)\s+([A-Za-z][\w'-]+)$/);
   if (m) {
     const base = m[1];
-    const suffix = m[2];
-    if (/^[A-Z][A-Za-z'-]*$/.test(suffix) && seen.has(base)) return base;
+    const baseLc = base.toLowerCase();
+    const seenCanon = Array.from(seen).find(n => n.toLowerCase() === baseLc);
+    if (seenCanon) {
+      aliases[lc] = seenCanon;
+      aliases[original] = seenCanon;
+      return seenCanon;
+    }
   }
+
+  // Default: remember canonical capitalization for future case-insensitive matches
+  aliases[lc] = original;
   return original;
 }
 

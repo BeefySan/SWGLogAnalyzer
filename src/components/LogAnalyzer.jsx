@@ -45,23 +45,23 @@ function computeCombatStats(events) {
   const blocks = events.map(e => e?.mitigation?.blocked).filter(v => typeof v === 'number');
   const evades = events.map(e => e?.mitigation?.evaded).filter(v => typeof v === 'number');
 
-  const avg = (arr)=> arr.length ? arr.reduce((s,v)=>s+v,0)/arr.length : 0;
+  const avg = (arr: number[]) => arr.length ? arr.reduce((s,v)=>s+v,0)/arr.length : 0;
 
   return {
-    totalAttacks: attacks.length,
-    hitCount: hits.length,
-    critCount: crits.length,
-    glanceCount: glances.length,
-    missCount: misses.length,
-    stCount: penetrations.length,
+    totalAttacks: attacks.length || 0,
+    hitCount: hits.length || 0,
+    critCount: crits.length || 0,
+    glanceCount: glances.length || 0,
+    missCount: misses.length || 0,
+    stCount: penetrations.length || 0,
     critRate: attacks.length ? crits.length/attacks.length : 0,
     glanceRate: attacks.length ? glances.length/attacks.length : 0,
     missRate: attacks.length ? misses.length/attacks.length : 0,
     stAvg: avg(penetrations),
     blockAvg: avg(blocks),
     evadeAvg: avg(evades),
-    blockCount: blocks.length,
-    evadeCount: evades.length,
+    blockCount: blocks.length || 0,
+    evadeCount: evades.length || 0,
   };
 }
 

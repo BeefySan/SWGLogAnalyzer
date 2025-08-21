@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState, useCallback, useTransition
 import ErrorBoundary from "./ErrorBoundary";
 import DpsPopoutButton from "./components/DpsPopoutButton";
 import { ResponsiveContainer, AreaChart, Area, LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip, Legend, BarChart, Bar, LabelList, Cell, Sankey, ReferenceLine, ReferenceArea } from "recharts";
+import EncounterSummary from "./components/EncounterSummary";
+import StarLoader from './StarLoader';
 
 // --- Bigger, centered label for death-flag ReferenceLines ---
 type DeathLabelProps = {
@@ -205,6 +207,178 @@ const SW_CSS = /* css */ `
 `;
 
 
+
+// --- Toolbar / Ribbon styles ---
+const RIBBON_CSS = /* css */ `
+.ribbon{
+  max-width:2300px; margin:0 auto 8px;
+  display:grid; grid-template-columns:auto auto auto auto;
+  justify-content:center; align-items:center; gap:10px;
+  background: var(--panel,#0e1726);
+  border:1px solid var(--panel-border,#1b2a3d);
+  border-radius:16px; padding:12px 14px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.04);
+}
+.ribbon .group{display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+.ribbon .title{font-weight:700; letter-spacing:.2px; color:var(--text,#cfe3ff); display:flex; gap:10px}
+
+/* File pill */
+.filepill{display:flex; align-items:center; gap:12px;
+  background: var(--panel-2,#0c1624);
+  border:1px solid var(--panel-border,#1b2a3d);
+  padding:10px 14px; border-radius:999px;
+}
+.filepill input[type="file"]{display:none}
+.filepill .btn-file{background:transparent; border:1px dashed rgba(255,255,255,.25);
+  color:var(--text); border-radius:999px; padding:8px 12px; cursor:pointer}
+.filepill .hint{opacity:.8; font-size:12px}
+
+/* Segmented Metric (bigger + readable when inactive) */
+.segmented{
+  display:inline-flex; gap:8px; padding:6px;
+  border-radius:999px; background:var(--panel-2,#0c1624);
+  border:1px solid var(--panel-border,#1b2a3d);
+}
+.segmented .seg{
+  padding:10px 16px; border-radius:999px; font-size:16px; font-weight:600;
+  border:1px solid rgba(255,255,255,.12); cursor:pointer;
+  color:#d6e6ff;                       /* readable */
+  background: rgba(255,255,255,.08);   /* visible chip even when inactive */
+}
+.segmented .seg:hover{filter:brightness(1.08)}
+.segmented .seg.active{
+  color:#ffffff;
+  background: rgba(98,176,255,.22);
+  border-color: rgba(98,176,255,.55);
+  box-shadow: 0 0 0 1px rgba(98,176,255,.25) inset;
+}
+
+/* Controls (+25%) */
+.ribbon select, .ribbon .btn, .ribbon .chip{
+  height:42px; font-size:16px; border-radius:12px;
+  border:1px solid var(--panel-border,#1b2a3d);
+  background: var(--panel-2,#0c1624); color: var(--text,#cfe3ff);
+  padding:0 12px;
+}
+.ribbon .btn{
+  background: linear-gradient(180deg, rgba(98,176,255,.28), rgba(98,176,255,.10));
+  border-color: rgba(98,176,255,.55); font-weight:700; letter-spacing:.1px; cursor:pointer;
+}
+.ribbon .btn.ghost{background:transparent; border-color:var(--panel-border)}
+.ribbon .btn.warn{background:linear-gradient(180deg, rgba(255,157,0,.34), rgba(255,157,0,.12));
+  border-color: rgba(255,157,0,.58) }
+.ribbon .chip{display:inline-flex; align-items:center; gap:8px; cursor:pointer}
+.ribbon .chip input{accent-color: var(--accent,#21d4fd)}
+
+/* Paste drawer */
+.paste-drawer{margin-top:10px; max-width:1480px; margin-inline:auto;
+  background:var(--panel,#0e1726); border:1px solid var(--panel-border,#1b2a3d);
+  border-radius:12px; padding:10px}
+.paste-drawer textarea{
+  width:100%; min-height:110px; resize:vertical; font-size:15px;
+  background:var(--bg2,#0b1426); color:var(--text,#cfe3ff);
+  border:1px solid rgba(255,255,255,.12); border-radius:12px; padding:12px;
+}
+`;
+
+const RIBBON_EXTRA = /* css */ `
+.center-stack{display:flex;flex-direction:column;align-items:center;gap:12px;}
+.center-toggle-row{display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap;}
+.ab-box{display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap;
+  background: var(--panel-2,#0c1624);
+  border:1px solid var(--panel-border,#1b2a3d);
+  border-radius:12px;
+  padding:10px 12px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+}
+.ab-box select{height:44px; min-width:260px; font-size:16px; border-radius:12px;}
+`;
+
+
+const ENC_CSS = /* css */ `
+/* Encounter Summary button — flaming red pulse */
+.swg-theme .enc-btn{
+  position: relative;
+  padding: 75px 44px;
+  border-radius: 999px;
+  border: 1px solid rgba(120,170,255,.55);
+  background-image: var(--bg-image, linear-gradient(180deg, rgba(33,212,253,.18), rgba(10,60,120,.24)));
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+  color:#eaf3ff;
+  font-weight:800;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  cursor:pointer;
+  overflow:hidden;
+  /* subtle base glow so it still looks good between pulses */
+  box-shadow:
+    0 0 0 1px rgba(0,0,0,.35) inset,
+    0 0 22px rgba(255, 60, 0, .25);
+  transition: transform .08s ease, filter .12s ease;
+  z-index: 2;
+}
+
+/* Outer flame haze */
+.swg-theme .enc-btn::before{
+  content:"";
+  position:absolute; inset:-10px;
+  border-radius:999px;
+  /* layered “flame” lobes rising from bottom */
+  background:
+    radial-gradient(60% 120% at 50% 105%, rgba(255,120,40,.60), rgba(255,0,0,0) 70%),
+    radial-gradient(42% 90%  at 30% 110%, rgba(255,80,20,.55),  rgba(255,0,0,0) 62%),
+    radial-gradient(42% 90%  at 70% 110%, rgba(255,80,20,.55),  rgba(255,0,0,0) 62%);
+  filter: blur(12px) saturate(1.2);
+  opacity:.65;
+  pointer-events:none;
+  animation: enc-flame 2.2s ease-in-out infinite;
+}
+
+/* Pulsing red corona + inner vignette */
+.swg-theme .enc-btn::after{
+  content:"";
+  position:absolute; inset:-2px;
+  border-radius:999px;
+  pointer-events:none;
+  background: linear-gradient(180deg, rgba(0,0,0,.22), rgba(0,0,0,.42));
+  box-shadow:
+    0 0 0 2px rgba(255,80,20,.28) inset,
+    0 0 20px rgba(255,60,0,.45),
+    0 0 55px rgba(255,40,0,.25);
+  animation: enc-pulse 1.8s ease-in-out infinite;
+}
+
+.swg-theme .enc-btn:hover{
+  filter: brightness(1.08);
+  transform: translateY(-1px) scale(1.01);
+}
+
+/* Subtle rise + flicker */
+@keyframes enc-flame{
+  0%,100% { transform: translateY(0)    scale(1);    filter: blur(12px) saturate(1.15); opacity:.55; }
+  50%     { transform: translateY(-6px) scale(1.05); filter: blur(14px) saturate(1.35); opacity:.85; }
+}
+
+/* Glow breath */
+@keyframes enc-pulse{
+  0%,100% {
+    box-shadow:
+      0 0 0 2px rgba(255,80,20,.28) inset,
+      0 0 20px rgba(255,60,0,.45),
+      0 0 55px rgba(255,40,0,.25);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px rgba(255,120,40,.45) inset,
+      0 0 36px rgba(255,60,0,.75),
+      0 0 110px rgba(255,40,0,.55);
+    transform: scale(1.02);
+  }
+}
+`;
 // ---- Elemental support (injected) ----
 type ElementalBreakdown = Record<string, number>;
 
@@ -278,6 +452,18 @@ function hintedElementsForAbility(abilityNorm: string, totalDamage: number): Ele
 
 
 /* ========================= Utilities & Types ========================= */
+// Keep ~target points by skipping with a computed step (fast & simple)
+function downsampleToTarget<T>(arr: T[], target: number): T[] {
+  const n = Math.max(1, target|0);
+  if (arr.length <= n) return arr;
+  const step = Math.ceil(arr.length / n);
+  const out: T[] = [];
+  for (let i = 0; i < arr.length; i += step) out.push(arr[i]);
+  // keep last point for right-edge alignment
+  if (arr.length && out[out.length - 1] !== arr[arr.length - 1]) out.push(arr[arr.length - 1]);
+  return out;
+}
+
 
 type MetricKey = 'damageDealt'|'avgDps'|'healingDone';
 type PlayerRow = { name:string; profession?:string; damageDealt:number; healingDone:number; avgDps:number };
@@ -583,14 +769,147 @@ function mergeNormalizedAbilities(
   return { pa: outPa, pat: outPat };
 }
 
+
+function TopRibbon(props:{
+  onPickFile:(f:File)=>void;
+  onParsePaste:()=>void;
+  pasteText:string; setPasteText:(s:string)=>void;
+  metric:MetricKey; setMetric:(s:MetricKey)=>void;
+  collectUnparsed:boolean; setCollectUnparsed:(v:boolean)=>void;
+  compareOn:boolean; setCompareOn:(v:boolean)=>void;
+  pA:string; setPA:(s:string)=>void;
+  pB:string; setPB:(s:string)=>void;
+  players:string[];
+  onClearAB:()=>void;
+  parsing?: {done:number,total:number}|null;
+  timelineStep:number; setTimelineStep:(n:number)=>void;
+
+  onOpenSummary?: () => void;
+}){
+  const [showPaste, setShowPaste] = React.useState(false);
+  return (
+    <>
+      <div className="ribbon">
+        <div className="group">
+          <div className="chip" title="Reduce timeline render points to improve FPS">
+            <span>Timeline fidelity</span>
+            <select className="input" value={props.timelineStep} onChange={e=>props.setTimelineStep(Number(e.target.value)||1)}>
+              <option value={1}>Every 1s</option>
+              <option value={2}>Every 2s</option>
+              <option value={3}>Every 3s</option>
+              <option value={5}>Every 5s</option>
+              <option value={10}>Every 10s</option>
+            </select>
+          </div>
+          <div className="title">Upload SWG chatlog.txt</div>
+          <label className="filepill">
+            <input type="file" accept=".txt,.log"
+              onChange={e=>{ const f=e.target.files?.[0]; if(f) props.onPickFile(f); }}/>
+            <span className="btn-file">Choose File</span>
+            <span className="hint">.txt / .log</span>
+          </label>
+          <button className="btn ghost" onClick={()=>setShowPaste(v=>!v)}>
+            {showPaste ? "Hide Paste" : "Paste Raw Lines"}
+          </button>
+        </div>
+
+        
+<div className="group" style={{ justifyContent: 'center', minWidth: 260 }}>
+  <button
+    type="button"
+    className="enc-btn"
+    onClick={() => props.onOpenSummary && props.onOpenSummary()}
+    title="Open Encounter Summary"
+  >
+    ENCOUNTER SUMMARY
+  </button>
+</div>
+
+<div className="group center-stack" style={{justifyContent:'center'}}>
+          <div className="segmented" role="tablist" aria-label="Metric">
+            {[
+              {label:"Damage Dealt", key:"damageDealt"},
+              {label:"Average DPS", key:"avgDps"},
+              {label:"Healing Done", key:"healingDone"},
+            ].map(x=>(
+              <button key={x.key}
+                className={"seg "+(props.metric===x.key ? "active": "")}
+                onClick={()=>props.setMetric(x.key as MetricKey)}>{x.label}</button>
+            ))}
+          </div>
+
+          <label className="chip">
+            <input type="checkbox" checked={props.collectUnparsed}
+              onChange={e=>props.setCollectUnparsed(e.target.checked)} />
+            Collect unparsed lines
+          </label>
+
+          <label className="chip">
+            <input type="checkbox" checked={props.compareOn}
+              onChange={e=>props.setCompareOn(e.target.checked)} />
+            Player comparison
+          </label>
+        
+  <div className="ab-box">
+    <select disabled={!props.compareOn} value={props.pA} onChange={e=>props.setPA(e.target.value)}>
+      <option value="">A: Select player</option>
+      {props.players.map(p=> <option key={"A"+p} value={p}>{p}</option>)}
+    </select>
+    <select disabled={!props.compareOn} value={props.pB} onChange={e=>props.setPB(e.target.value)}>
+      <option value="">B: Select player</option>
+      {props.players.map(p=> <option key={"B"+p} value={p}>{p}</option>)}
+    </select>
+  </div>
+</div>
+
+        <div className="group" style={{justifyContent:'flex-end'}}>
+
+          <button className="btn warn" disabled={!props.compareOn} onClick={props.onClearAB}>CLEAR A/B</button>
+          <DpsPopoutButton makeWorker={() => new Worker(new URL('./parser.worker.ts', import.meta.url), { type: 'module' })} />
+          {props.parsing && <span className="badge">Parsing… <progress max={props.parsing.total} value={props.parsing.done}></progress></span>}
+        </div>
+      </div>
+
+      {showPaste && (
+        <div className="paste-drawer">
+          <textarea
+            value={props.pasteText}
+            onChange={e=>props.setPasteText(e.target.value)}
+            placeholder="Or paste raw lines here…"
+          />
+          <div style={{display:'flex', gap:8, justifyContent:'flex-end', marginTop:8}}>
+            <button className="btn" onClick={props.onParsePaste}>PARSE PASTED TEXT</button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
 /* ========================= Main App ========================= */
 
 export default function App(){
   // raw/unfiltered results from worker
+const [timelineStep, setTimelineStep] = useState<number>(1);
   const [baseRows, setBaseRows] = useState<PlayerRow[]>([]);
+  // Allowed player professions
+  const ALLOWED_CLASSES = useMemo(() => new Set([
+    'Jedi','Bounty Hunter','Commando','Officer','Spy','Medic','Smuggler','Entertainer','Trader'
+  ].map(s => s.toLowerCase())), []);
+
+  // Names that have a known, allowed class
+  const playersWithClass = useMemo(() => (
+    (baseRows || [])
+      .filter(r => !!r?.name && !!r?.profession && ALLOWED_CLASSES.has(String(r.profession).toLowerCase().trim()))
+      .map(r => r.name)
+  ), [baseRows, ALLOWED_CLASSES]);
   const [baseTimeline, setBaseTimeline] = useState<Array<{t:number; dps:number; hps:number}>>([]);
   const [basePerSrc, setBasePerSrc] = useState<Record<string, number[]>>({});
-  const [basePerAbility, setBasePerAbility] = useState<PerAbility>({});
+  
+  // Broad NPC alias tokens used to hide NPCs from Encounter Summary (substring, case-insensitive)
+  const npcAliases = useMemo(() => [
+    'sith shadow', 'element of', 'mynock', 'golem', 'kizash', 'mellichae', 'sinya nilim', 'krix', 'warlord', 'raider', 'flight', 'grenadier', 'blackguard', 'blacksun', 'honor'
+  ], []);
+const [basePerAbility, setBasePerAbility] = useState<PerAbility>({});
   const [basePerAbilityTargets, setBasePerAbilityTargets] = useState<PerAbilityTargets>({});
   const [basePerTaken, setBasePerTaken] = useState<Record<string, number>>({});
   const [basePerTakenBy, setBasePerTakenBy] = useState<Record<string, Record<string, number>>>({});
@@ -602,24 +921,56 @@ export default function App(){
 
   // filtered (by segment) derived state
   const [rows, setRows] = useState<PlayerRow[]>([]);
-
   // smooth heavy updates & defer list derivations
   const [isPending, startTransition] = useTransition();
   const rowsDeferred = useDeferredValue(rows);
   const [timeline, setTimeline] = useState<Array<{t:number; dps:number; hps:number}>>([]);
-  const [perSrc, setPerSrc] = useState<Record<string, number[]>>({});
+  
+  // --- Downsample timeline for performance (target ~N points) ---
+const TARGET_POINTS = 30; // set to 5 so you can clearly see it working
+const timelineView = useMemo(
+  () => downsampleToTarget(timeline, TARGET_POINTS),
+  [timeline, TARGET_POINTS]
+);
+
+// (optional) quick sanity log
+useEffect(() => {
+  console.log("timeline:", timeline.length, "timelineView:", timelineView.length, "TARGET_POINTS:", TARGET_POINTS);
+}, [timeline, timelineView, TARGET_POINTS]);
+const [perSrc, setPerSrc] = useState<Record<string, number[]>>({});
   const [perAbility, setPerAbility] = useState<PerAbility>({});
   const [perAbilityTargets, setPerAbilityTargets] = useState<PerAbilityTargets>({});
   const [perTaken, setPerTaken] = useState<Record<string, number>>({});
   const [perTakenBy, setPerTakenBy] = useState<Record<string, Record<string, number>>>({});
 
-  // ui state
-  const [metric, setMetric] = useState<MetricKey>('damageDealt');
-  const [pasteText, setPasteText] = useState('');
-  const [collectUnparsed, setCollectUnparsed] = useState(false);
-  const [parsing, setParsing] = useState<{done:number,total:number}|null>(null);
-  const [compareOn, setCompareOn] = useState(true);
-  const [pA, setPA] = useState(''); const [pB, setPB] = useState(''); 
+// ui state
+const [metric, setMetric] = useState<MetricKey>('damageDealt');
+const [pasteText, setPasteText] = useState('');
+const [collectUnparsed, setCollectUnparsed] = useState(false);
+const [parsing, setParsing] = useState<{done:number,total:number}|null>(null);
+const [compareOn, setCompareOn] = useState(true);
+
+const [encOpen, setEncOpen] = useState(false);
+const [encLoading, setEncLoading] = useState(false);
+
+const LOADER_OPEN_DELAY_MS = 1200;
+const LOADER_MIN_MS = 2500;
+
+const openSummary = React.useCallback(() => {
+  console.log('[openSummary] start');
+  setEncLoading(true);                          // ✅ mount the “Slicing Data…” overlay
+
+  setTimeout(() => {
+    console.log('[openSummary] opening modal');
+    setEncOpen(true);                           // ✅ open the modal a bit later
+  }, LOADER_OPEN_DELAY_MS);
+
+  setTimeout(() => {
+    console.log('[openSummary] hide loader');
+    setEncLoading(false);                       // ✅ keep loader up long enough to see it
+  }, LOADER_MIN_MS);
+}, [LOADER_OPEN_DELAY_MS, LOADER_MIN_MS]);
+const [pA, setPA] = useState(''); const [pB, setPB] = useState(''); 
   const [mode, setMode] = useState<'sources'|'abilities'|'statistics'>('sources'); // <- extended
   const [smooth, setSmooth] = useState(true);
   const workerRef = useRef<Worker|null>(null);
@@ -655,7 +1006,7 @@ const resetWindow = useCallback(() => {
   const [selecting, setSelecting] = useState<{x0:number, x1:number} | null>(null);
   const [hoverX, setHoverX] = useState<number | null>(null);
 
-  const clampToActive = useCallback((start:number, end:number)=>{
+const clampToActive = useCallback((start:number, end:number)=>{
     if (segIndex >= 0 && segments[segIndex]) {
       const seg = segments[segIndex];
       const s = Math.max(seg.start, Math.min(start, end));
@@ -986,6 +1337,13 @@ w.onmessage = (ev:any)=>{
   const listDamage = useMemo(()=> barData(rows, metric), [rows, metric]);
   const listHealing = useMemo(()=> barData(rows, 'healingDone'), [rows]);
   const inferredClasses = useMemo(()=> inferClasses(rows, perAbility), [rows, perAbility]);
+
+  const playersWithInferredClass = useMemo(() => (
+    (rows || [])
+      .filter(r => !!r?.name && !!inferredClasses[r.name])
+      .filter(r => ALLOWED_CLASSES.has(String(inferredClasses[r.name]).toLowerCase()))
+      .map(r => r.name)
+  ), [rows, inferredClasses, ALLOWED_CLASSES]);
   const listAPM = useMemo(()=> actionsPerMinute(rows, perAbility, (segIndex>=0 && segments[segIndex]) ? (segments[segIndex].end - segments[segIndex].start + 1) : duration), [rows, perAbility, duration, segIndex, segments]);
 
   const takenFor = useMemo(()=> {
@@ -997,15 +1355,15 @@ w.onmessage = (ev:any)=>{
     return items.sort((a,b)=> b.value - a.value).slice(0,12);
   }, [perTaken, perTakenBy, compareOn, pA, pB]);
 
-  const TLdps = useMemo(()=> timeline.map(d=>({t:d.t, v:d.dps})), [timeline]);
-  const TLhps = useMemo(()=> timeline.map(d=>({t:d.t, v:d.hps})), [timeline]);
-  const seriesDuration = useMemo(()=> (timeline.length ? (timeline[timeline.length-1].t - timeline[0].t + 1) : duration), [timeline, duration]);
+  const TLdps = useMemo(()=> timelineView.map(d=>({t:d.t, v:d.dps})), [timelineView]);
+  const TLhps = useMemo(()=> timelineView.map(d=>({t:d.t, v:d.hps})), [timelineView]);
+  const seriesDuration = useMemo(()=> (timeline.length ? (timeline[timeline.length-1].t - timeline[0].t + 1) : duration), [timelineView, duration]);
 
   function seriesFor(name:string){
     const arr = perSrc[name]||[];
     if (!arr.length) return [];
-    const first = timeline[0]?.t ?? 0;
-    const last = timeline.length ? timeline[timeline.length-1].t : duration;
+    const first = timelineView[0]?.t ?? 0;
+    const last = timelineView.length ? timelineView[timelineView.length-1].t : duration;
     const out: {t:number; v:number}[] = [];
     for (let t=first; t<=last; t++){
       if (arr[t]) out.push({ t, v: arr[t] });
@@ -1083,49 +1441,49 @@ const deathFlags = useMemo(() => {
   return <ErrorBoundary>
     <div className="swg-theme">
       <style dangerouslySetInnerHTML={{ __html: SW_CSS }} />
+      <style dangerouslySetInnerHTML={{ __html: RIBBON_CSS }} />
+      <style dangerouslySetInnerHTML={{ __html: RIBBON_EXTRA }} />
+      <style dangerouslySetInnerHTML={{ __html: ENC_CSS }} />
       <div style={{ minHeight:'100vh', padding:16 }}>
-      <div className="card" style={{ padding:12, marginBottom:12 }}>
-        <div className="row">
-          <label className="row" style={{gap:8}}>
-            <span style={{opacity:.8,fontWeight:700}}>Upload SWG chatlog.txt</span>
-            <input className="input" type="file" accept=".txt,.log" onChange={(e)=>onChoose(e.target.files)} />
-          </label>
+      
+<div className="card" style={{ padding:12, marginBottom:12 }}>
+  
+<TopRibbon
+  onPickFile={(file) => {
+    const fr = new FileReader();
+    fr.onload = () => parseTextViaWorker(String(fr.result || ''));
+    fr.readAsText(file);
+  }}
+  onParsePaste={() => { if (!pasteText.trim()) return; parseTextViaWorker(pasteText); }}
+  pasteText={pasteText} setPasteText={setPasteText}
+  metric={metric} setMetric={setMetric}
+  collectUnparsed={collectUnparsed} setCollectUnparsed={setCollectUnparsed}
+  compareOn={compareOn} setCompareOn={setCompareOn}
+  pA={pA} setPA={setPA}
+  pB={pB} setPB={setPB}
+  players={names}
+  onClearAB={() => { setPA(''); setPB(''); }}
+  parsing={parsing}
+  timelineStep={timelineStep} setTimelineStep={setTimelineStep}
+  onOpenSummary={openSummary}
+/>
 
-          <span style={{opacity:.8,fontWeight:700}}>Metric:</span>
-          <select className="input" value={metric} onChange={(e)=>setMetric(e.target.value as MetricKey)}>
-            <option value="damageDealt">Damage Dealt</option>
-            <option value="avgDps">Average DPS</option>
-            <option value="healingDone">Healing Done</option>
-          </select>
+</div>
 
-          <label className="row" style={{gap:6}}>
-            <input type="checkbox" checked={collectUnparsed} onChange={(e)=>setCollectUnparsed(e.target.checked)} />
-            <span className="pill">Collect unparsed lines</span>
-          </label>
+<EncounterSummary
+  open={encOpen}
+  onClose={() => setEncOpen(false)}
+  basePerSrc={basePerSrc}
+  segments={segments}
+  deathEvents={deathEvents}
+  
+    excludeAliases={npcAliases}
+    realPlayers={playersWithInferredClass}
+  classOf={inferredClasses}
+  allowedClasses={Array.from(ALLOWED_CLASSES)}
+  />
+<StarLoader show={encLoading} />
 
-          <label className="row" style={{gap:6, marginLeft:8}}>
-            <input type="checkbox" checked={compareOn} onChange={(e)=>setCompareOn(e.target.checked)} />
-            <span className="pill">Player comparison</span>
-          </label>
-          <select className="input" disabled={!compareOn} value={pA} onChange={e=>setPA(e.target.value)}>
-            <option value="">A: Select player</option>
-            {names.map(n=> <option key={'A'+n} value={n}>{n}</option>)}
-          </select>
-          <select className="input" disabled={!compareOn} value={pB} onChange={e=>setPB(e.target.value)}>
-            <option value="">B: Select player</option>
-            {names.map(n=> <option key={'B'+n} value={n}>{n}</option>)}
-          </select>
-          <button className="btn" disabled={!compareOn} onClick={()=>{ setPA(''); setPB(''); }}>Clear A/B</button>
-          <DpsPopoutButton makeWorker={() => new Worker(new URL('./parser.worker.ts', import.meta.url), { type: 'module' })} />
-
-          {parsing && <span className="badge">Parsing… <progress max={parsing.total} value={parsing.done}></progress> {fmt0(parsing.done)}/{fmt0(parsing.total)}</span>}
-        </div>
-
-        <div className="row" style={{marginTop:10}}>
-          <textarea className="input mono" placeholder="Or paste raw lines here…" value={pasteText} onChange={(e)=>setPasteText(e.target.value)} style={{width:'min(900px,100%)',height:90}} />
-          <button className="btn" onClick={()=>{ if(!pasteText.trim()) return; parseTextViaWorker(pasteText) }}>Parse pasted text</button>
-        </div>
-      </div>
 
       {/* Timeline + segments UI */}
       <div className="card">
@@ -1455,6 +1813,8 @@ const deathFlags = useMemo(() => {
     </div>
   </div>
     </div>
+
+      <StarLoader show={encLoading} />
 </ErrorBoundary>;
 }
 

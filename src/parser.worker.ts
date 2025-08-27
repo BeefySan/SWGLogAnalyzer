@@ -388,6 +388,7 @@ function mergePerAbilityTargetsMap(map: any): any {
   return out;
 }
 const dpsByActor: Record<string, number[]> = {};
+    const actionsByActorSec: Record<string, Record<number, Set<string>>> = {};
     const hpsByActor: Record<string, number[]> = {};
 
     const perAbility: PerAbility = {};
@@ -448,6 +449,15 @@ const dpsByActor: Record<string, number[]> = {};
         evadedPct,
         ...(hasElems ? { elements: elemHint } : {})
       });
+
+// Count unique actions per (sec, normalized ability)
+if (flags !== 'periodic') {
+  const akey = abilityKey || 'attack';
+  if (!actionsByActorSec[src]) actionsByActorSec[src] = {};
+  if (!actionsByActorSec[src][t]) actionsByActorSec[src][t] = new Set<string>();
+  actionsByActorSec[src][t].add(akey);
+}
+
 
       if (amount > 0) {
         if (!dpsByActor[src]) dpsByActor[src] = [];
@@ -788,7 +798,25 @@ const dpsByActor: Record<string, number[]> = {};
 const dpsCanon = mergeSeriesMap(dpsByActor);
 const hpsCanon = mergeSeriesMap(hpsByActor);
 const actors = new Set<string>([...Object.keys(dpsCanon), ...Object.keys(hpsCanon)]);
-    const rows: PlayerRow[] = [];
+    
+
+// Build per-second action counts (distinct abilities used that second)
+const actionsByActor: Record<string, number[]> = {};
+const apmByActor: Record<string, number> = {};
+const fightMinutes = Math.max(1, (maxAbs||0) / 60);
+for (const a of Object.keys(dpsCanon)) {
+  const secMap = actionsByActorSec[a] || {};
+  const arr: number[] = [];
+  let total = 0;
+  for (let sec = 0; sec <= maxAbs; sec++) {
+    const c = (secMap[sec] ? secMap[sec].size : 0);
+    arr[sec] = c;
+    total += c;
+  }
+  actionsByActor[a] = arr;
+  apmByActor[a] = total / fightMinutes;
+}
+const rows: PlayerRow[] = [];
     const tl: Array<{ t: number; dps: number; hps: number }> = [];
     for (let sec = 0; sec <= maxAbs; sec++) {
       let d = 0,
@@ -860,6 +888,8 @@ const actors = new Set<string>([...Object.keys(dpsCanon), ...Object.keys(hpsCano
       perSrc: dpsCanon,
       perAbility: mergePerAbilityMap(perAbility),
       perAbilityTargets: mergePerAbilityTargetsMap(perAbilityTargets),
+      actionsByActor,
+      apmByActor,
       perTaken,
       perTakenBy,
       defense: perDef, // raw tallies

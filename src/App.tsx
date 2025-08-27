@@ -749,11 +749,11 @@ function smoothSeries(data:{t:number;v:number}[], window=5){
   });
 }
 
-function actionsPerMinute(rows:PlayerRow[], perAbility:PerAbility, duration:number){
+function actionsPerMinute(rows:PlayerRow[], actionsByActor:Record<string, number[]>, duration:number){
   const minutes = Math.max(1, duration/60);
   const items = rows.map(r=>{
-    const abilities = perAbility[r.name] || {};
-    const hits = Object.values(abilities).reduce((s:any,v:any)=> s + (v?.hits||0), 0);
+    const series = actionsByActor[r.name] || [];
+    const hits = series.reduce((s:number,v:number)=> s + (v||0), 0);
     const apm = hits / minutes;
     return { name: r.name || 'Unknown', value: Math.round(apm) };
   });
@@ -932,6 +932,7 @@ const [timelineStep, setTimelineStep] = useState<number>(1);
   ), [baseRows, ALLOWED_CLASSES]);
   const [baseTimeline, setBaseTimeline] = useState<Array<{t:number; dps:number; hps:number}>>([]);
   const [basePerSrc, setBasePerSrc] = useState<Record<string, number[]>>({});
+  const [actionsByActor, setActionsByActor] = useState<Record<string, number[]>>({});
   
   // Broad NPC alias tokens used to hide NPCs from Encounter Summary (substring, case-insensitive)
   const npcAliases = useMemo(() => [
@@ -1113,6 +1114,7 @@ setBaseRows(rwsCanon); setBaseTimeline(tl);
         setBasePerSrc(perSrcCanon);
         setBasePerAbility(basePaNorm);
         setBasePerAbilityTargets(basePatNorm);
+        setActionsByActor(msg.payload?.actionsByActor||{});
         setBasePerTaken(perTaken||{});
         setBasePerTakenBy(perTakenBy||{});
         setDamageEvents(damageEvents||[]);
@@ -1376,7 +1378,7 @@ setBaseRows(rwsCanon); setBaseTimeline(tl);
       .filter(r => ALLOWED_CLASSES.has(String(inferredClasses[r.name]).toLowerCase()))
       .map(r => r.name)
   ), [rows, inferredClasses, ALLOWED_CLASSES]);
-  const listAPM = useMemo(()=> actionsPerMinute(rows, perAbility, (segIndex>=0 && segments[segIndex]) ? (segments[segIndex].end - segments[segIndex].start + 1) : duration), [rows, perAbility, duration, segIndex, segments]);
+  const listAPM = useMemo(()=> actionsPerMinute(rows, actionsByActor, (segIndex>=0 && segments[segIndex]) ? (segments[segIndex].end - segments[segIndex].start + 1) : duration), [rows, actionsByActor, duration, segIndex, segments]);
 
   const takenFor = useMemo(()=> {
     const who = (compareOn && (pA || pB)) ? (pA || pB) : '';

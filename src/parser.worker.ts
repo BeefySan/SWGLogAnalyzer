@@ -355,6 +355,10 @@ self.onmessage = async (ev: MessageEvent<any>) => {
       preMitTotal?:number,
       evadedPct?:number
     ){
+      // Guard: drop non-realistic single-hit damage (> 60k)
+      const MAX_REALISTIC_HIT = 60000;
+      if ((amount ?? 0) > MAX_REALISTIC_HIT) { return; }
+
       const abilityKey = normalizeAbilityName(abilityRaw || 'attack');
 
       // Prefer explicit parsed split; otherwise fall back to ability hints
@@ -538,6 +542,7 @@ self.onmessage = async (ev: MessageEvent<any>) => {
         const kindRaw = (m[4] || "").toLowerCase().replace(/\s+/g, " ");
         const evadedPct = m[5] ? +m[5] : evadedFromScan;
         const amount = +m[6];
+        if (60000 && amount > 60000) { parsed++; continue; }
 
         const flag =
           kindRaw === "crits"
@@ -575,6 +580,7 @@ self.onmessage = async (ev: MessageEvent<any>) => {
         const kindRaw = (m[3] || "").toLowerCase().replace(/\s+/g, " ");
         const evadedPct = m[4] ? +m[4] : evadedFromScan;
         const amount = +m[5];
+        if (60000 && amount > 60000) { parsed++; continue; }
 
         const flag =
           kindRaw === "crits"
@@ -610,6 +616,7 @@ self.onmessage = async (ev: MessageEvent<any>) => {
       if ((m = RX_DMG_GENERIC.exec(rest))) {
         const { src, dst } = normNames(m[1], m[2]);
         const amount = +m[3];
+        if (60000 && amount > 60000) { parsed++; continue; }
         const ability = clean(m[4] || "attack");
         if (src) {
           pushDamage(
@@ -636,6 +643,7 @@ self.onmessage = async (ev: MessageEvent<any>) => {
         if (dstNormOnly && !looksLikeNPC(dstNormOnly)) seenActors.add(dstNormOnly);
 
         const amount = +m[2];
+        if (60000 && amount > 60000) { parsed++; continue; }
         const abilityRaw = clean(m[3]);
         const key = normalizeAbilityName(abilityRaw);
         const caster = lastCasterForDot[`${key}||${dstNormOnly}`] || lastDamageSourceForTarget[dstNormOnly] || "";
@@ -682,6 +690,7 @@ self.onmessage = async (ev: MessageEvent<any>) => {
       if ((m = RX_DMG_CAUSED.exec(rest))) {
         const { src, dst } = normNames(m[1], m[2]);
         const amount = +m[3];
+        if (60000 && amount > 60000) { parsed++; continue; }
         const dtype = "Periodic";
         if (src) {
           pushDamage(t, src, dst, dtype, amount, undefined, "periodic");
@@ -705,7 +714,130 @@ self.onmessage = async (ev: MessageEvent<any>) => {
       if (collectUnparsed) unparsed.push(raw);
     }
 
-    // rows & timeline aggregates
+    
+    // --- Post-parse canonical merge (short name vs full name) ---
+    // Build mapping by first token -> canonical short form IF the group contains a single-token name.
+    (function mergeNamesByFirstToken(){
+      const firstToken = (n:string)=> (n||'').trim().split(/\s+/)[0]?.toLowerCase()||'';
+      const allTopLevel = new Set<string>([
+        ...Object.keys(dpsByActor),
+        ...Object.keys(hpsByActor),
+        ...Object.keys(perAbility),
+        ...Object.keys(perTaken),
+        ...Object.keys(perTakenBy||{}),
+      ]);
+      const groups: Record<string,string[]> = {};
+      for (const n of allTopLevel) {
+        const ft = firstToken(n); if (!ft) continue;
+        (groups[ft] ||= []).push(n);
+      }
+      const CANON: Record<string,string> = {};
+      for (const [ft, list] of Object.entries(groups)) {
+        // require at least one single-token actor to avoid collapsing NPCs like "Battle Droid"
+        const singles = list.filter(n => !/\s/.test(n));
+        if (singles.length === 0) continue;
+        const canon = singles[0]; // use the single-token as canonical
+        for (const n of list) CANON[n] = canon;
+      }
+      const mapName = (n:string)=> CANON[n] || n;
+
+      function mergeSeriesInPlace(byActor: Record<string, number[]>) {
+        const out: Record<string, number[]> = {};
+        for (const name of Object.keys(byActor)) {
+          const c = mapName(name);
+          const series = byActor[name]||[];
+          const arr = out[c] || (out[c] = []);
+          const L = Math.max(arr.length, series.length);
+          for (let i=0;i<L;i++) arr[i] = (arr[i]||0) + (series[i]||0);
+        }
+        for (const k of Object.keys(byActor)) delete byActor[k];
+        for (const k of Object.keys(out)) byActor[k] = out[k];
+      }
+      mergeSeriesInPlace(dpsByActor);
+      mergeSeriesInPlace(hpsByActor);
+
+      // perAbility merge (src)
+      {
+        const out: PerAbility = {};
+        for (const src of Object.keys(perAbility)) {
+          const csrc = mapName(src);
+          const abil = perAbility[src];
+          const dstA = out[csrc] || (out[csrc] = {} as any);
+          for (const ab of Object.keys(abil)) {
+            const s = abil[ab];
+            const t = dstA[ab] || (dstA[ab] = { hits:0, dmg:0, max:0 });
+            t.hits += s.hits; t.dmg += s.dmg; if (s.max > t.max) t.max = s.max;
+          }
+        }
+        for (const k of Object.keys(perAbility)) delete perAbility[k];
+        for (const k of Object.keys(out)) (perAbility as any)[k] = out[k];
+      }
+
+      // perAbilityTargets merge (src and dst)
+      {
+        const out: PerAbilityTargets = {};
+        for (const src of Object.keys(perAbilityTargets||{})) {
+          const csrc = mapName(src);
+          const byAb = perAbilityTargets[src];
+          const outSrc = out[csrc] || (out[csrc] = {} as any);
+          for (const ab of Object.keys(byAb)) {
+            const byDst = byAb[ab];
+            const outAb = outSrc[ab] || (outSrc[ab] = {} as any);
+            for (const dst of Object.keys(byDst)) {
+              const cdst = mapName(dst);
+              const s = byDst[dst];
+              const t = outAb[cdst] || (outAb[cdst] = { hits:0, dmg:0, max:0 });
+              t.hits += s.hits; t.dmg += s.dmg; if (s.max > t.max) t.max = s.max;
+            }
+          }
+        }
+        for (const k of Object.keys(perAbilityTargets||{})) delete (perAbilityTargets as any)[k];
+        for (const k of Object.keys(out)) (perAbilityTargets as any)[k] = out[k];
+      }
+
+      // perTaken (dst) and perTakenBy (dst -> src)
+      {
+        const outT: Record<string, number> = {};
+        for (const dst of Object.keys(perTaken||{})) {
+          const cdst = mapName(dst);
+          outT[cdst] = (outT[cdst]||0) + (perTaken as any)[dst];
+        }
+        for (const k of Object.keys(perTaken||{})) delete (perTaken as any)[k];
+        for (const k of Object.keys(outT)) (perTaken as any)[k] = outT[k];
+
+        const outTB: Record<string, Record<string, number>> = {};
+        for (const dst of Object.keys(perTakenBy||{})) {
+          const cdst = mapName(dst);
+          const srcMap = (perTakenBy as any)[dst];
+          const outDst = outTB[cdst] || (outTB[cdst] = {});
+          for (const src of Object.keys(srcMap)) {
+            const csrc = mapName(src);
+            outDst[csrc] = (outDst[csrc]||0) + srcMap[src];
+          }
+        }
+        for (const k of Object.keys(perTakenBy||{})) delete (perTakenBy as any)[k];
+        for (const k of Object.keys(outTB)) (perTakenBy as any)[k] = outTB[k];
+      }
+
+      // defense tallies (per defender)
+      {
+        const out: PerDefenderStats = {} as any;
+        for (const name of Object.keys(perDef||{})) {
+          const c = mapName(name);
+          const s = (perDef as any)[name];
+          const t = out[c] || (out[c] = { hits:0, glances:0, glanceDamageSum:0, dodges:0, parries:0 });
+          t.hits += s.hits; t.glances += s.glances; t.glanceDamageSum += s.glanceDamageSum;
+          t.dodges += s.dodges; t.parries += s.parries;
+        }
+        for (const k of Object.keys(perDef||{})) delete (perDef as any)[k];
+        for (const k of Object.keys(out)) (perDef as any)[k] = out[k];
+      }
+
+      // normalize names inside event arrays too (for UI popouts etc.)
+      for (const e of damageEvents||[]) { e.src = mapName(e.src); e.dst = mapName(e.dst); }
+      for (const e of healEvents||[])   { e.src = mapName(e.src); e.dst = mapName(e.dst); }
+    })();
+// rows & timeline aggregates
     const actors = new Set<string>([
       ...Object.keys(dpsByActor),
       ...Object.keys(hpsByActor),

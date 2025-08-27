@@ -684,34 +684,6 @@ const ENTITY_CANON: Record<string,string> = Object.fromEntries([
 
 function canonEntity(name:string){ const key = normName(name); return ENTITY_CANON[key] || name; }
 
-/* === Canonical merge helpers (combine aliases like "Colt" and "Colt Sutran") === */
-function mergeRowsByCanon(rows: PlayerRow[]): PlayerRow[] {
-  const map: Record<string, PlayerRow> = {};
-  for (const r of rows || []) {
-    const key = canonEntity(r.name || '');
-    const cur = map[key] || { name: key, profession: r.profession, damageDealt: 0, healingDone: 0, avgDps: 0 };
-    cur.damageDealt += Number(r.damageDealt || 0);
-    cur.healingDone += Number(r.healingDone || 0);
-    cur.avgDps = Math.max(Number(cur.avgDps||0), Number(r.avgDps||0));
-    if (!cur.profession && r.profession) cur.profession = r.profession;
-    map[key] = cur;
-  }
-  return Object.values(map);
-}
-function mergePerSrcByCanon(perSrc: Record<string, number[]>): Record<string, number[]> {
-  const out: Record<string, number[]> = {};
-  for (const [name, series] of Object.entries(perSrc || {})) {
-    const key = canonEntity(name);
-    const dest = out[key] || [];
-    const n = Math.max(dest.length, series.length);
-    const merged: number[] = new Array(n).fill(0);
-    for (let i = 0; i < n; i++) merged[i] = (dest[i] || 0) + (series[i] || 0);
-    out[key] = merged;
-  }
-  return out;
-}
-
-
 /* ========================= Helpers for charts & ability merging ========================= */
 
 function ClassLegend(){
@@ -749,13 +721,14 @@ function smoothSeries(data:{t:number;v:number}[], window=5){
   });
 }
 
-function actionsPerMinute(rows:PlayerRow[], actionsByActor:Record<string, number[]>, duration:number){
-  const minutes = Math.max(1, duration/60);
-  const items = rows.map(r=>{
-    const series = actionsByActor[r.name] || [];
-    const hits = series.reduce((s:number,v:number)=> s + (v||0), 0);
+
+function actionsPerMinute(perSecond:Record<string, number[]>, timelineWindow:{t:number}[], fallbackDuration:number){
+  const winDur = timelineWindow.length ? Math.max(1, (timelineWindow[timelineWindow.length-1].t - timelineWindow[0].t + 1)) : fallbackDuration;
+  const minutes = Math.max(1, winDur/60);
+  const items = Object.entries(perSecond||{}).map(([name, series])=>{
+    const hits = (series||[]).reduce((s:number,v:number)=> s + (v>0 ? 1 : 0), 0);
     const apm = hits / minutes;
-    return { name: r.name || 'Unknown', value: Math.round(apm) };
+    return { name: name || 'Unknown', value: Math.round(apm) };
   });
   return items.sort((a,b)=> b.value-a.value).slice(0,12);
 }
@@ -925,14 +898,34 @@ const [timelineStep, setTimelineStep] = useState<number>(1);
   ].map(s => s.toLowerCase())), []);
 
   // Names that have a known, allowed class
-  const playersWithClass = useMemo(() => (
-    (baseRows || [])
-      .filter(r => !!r?.name && !!r?.profession && ALLOWED_CLASSES.has(String(r.profession).toLowerCase().trim()))
-      .map(r => r.name)
-  ), [baseRows, ALLOWED_CLASSES]);
+  
+const playersWithClass = useMemo(() => {
+  const rows = (baseRows || []).filter(r => (
+    !!r?.name && !!r?.profession &&
+    ALLOWED_CLASSES.has(String(r.profession).toLowerCase().trim())
+  ));
+  // Build longest-by-first alias across these player rows
+  const longest: Record<string,string> = {};
+  for (const r of rows) {
+    const raw = String(r.name||'').trim();
+    const key = raw.split(/\s+/)[0]?.toLowerCase() || '';
+    if (!key) continue;
+    if (!longest[key] || raw.length > longest[key].length) longest[key] = raw;
+  }
+  // Return unique canonical player names (keeps order of appearance)
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const r of rows) {
+    const raw = String(r.name||'').trim();
+    const key = raw.split(/\s+/)[0]?.toLowerCase() || '';
+    const can = longest[key] || raw;
+    if (!seen.has(can)) { seen.add(can); out.push(can); }
+  }
+  return out;
+}, [baseRows, ALLOWED_CLASSES]);
+
   const [baseTimeline, setBaseTimeline] = useState<Array<{t:number; dps:number; hps:number}>>([]);
   const [basePerSrc, setBasePerSrc] = useState<Record<string, number[]>>({});
-  const [actionsByActor, setActionsByActor] = useState<Record<string, number[]>>({});
   
   // Broad NPC alias tokens used to hide NPCs from Encounter Summary (substring, case-insensitive)
   const npcAliases = useMemo(() => [
@@ -1106,15 +1099,10 @@ w.onmessage = (ev:any)=>{
         const { pa: basePaNorm, pat: basePatNorm } =
           mergeNormalizedAbilities(perAbility || {}, pat || {});
 
-        
-// --- Canonicalize names (merge aliases like "Colt" & "Colt Sutran") ---
-const rwsCanon = mergeRowsByCanon(rws || []);
-const perSrcCanon = mergePerSrcByCanon(perSrc || {});
-setBaseRows(rwsCanon); setBaseTimeline(tl);
-        setBasePerSrc(perSrcCanon);
+        setBaseRows(rws); setBaseTimeline(tl);
+        setBasePerSrc(perSrc||{});
         setBasePerAbility(basePaNorm);
         setBasePerAbilityTargets(basePatNorm);
-        setActionsByActor(msg.payload?.actionsByActor||{});
         setBasePerTaken(perTaken||{});
         setBasePerTakenBy(perTakenBy||{});
         setDamageEvents(damageEvents||[]);
@@ -1253,15 +1241,39 @@ setBaseRows(rwsCanon); setBaseTimeline(tl);
     const dE = damageEvents.filter(e => e.t>=start && e.t<=end);
     const hE = healEvents.filter(e => e.t>=start && e.t<=end);
 
-    // rows (canonicalized)
+    
+
+
+// --- Dynamic player aliasing (merge short vs full names safely) ---
+// Generic first words we should never use for aliasing (NPC phrases)
+const GENERIC_TOKENS = new Set(['a','an','the','with','using']);
+const LONGEST_BY_FIRST: Record<string,string> = {};
+const learn = (n?:string) => {
+  const raw = String(n||'').trim(); if (!raw) return;
+  const ft = raw.split(/\s+/)[0]?.toLowerCase() || '';
+  if (!ft || GENERIC_TOKENS.has(ft)) return;
+  const cur = LONGEST_BY_FIRST[ft];
+  if (!cur || raw.length > cur.length) LONGEST_BY_FIRST[ft] = raw;
+};
+dE.forEach(e => learn(e.src));
+hE.forEach(e => learn(e.src));
+(base.rows||[]).forEach(r => learn(r.name));
+
+const canonDyn = (n:string) => {
+  const raw = String(n||'').trim();
+  const ft = raw.split(/\s+/)[0]?.toLowerCase() || '';
+  if (!ft || GENERIC_TOKENS.has(ft)) return raw;
+  return LONGEST_BY_FIRST[ft] || raw;
+};
+// rows (canonicalized)
     const dmgBySrc: Record<string, number> = {};
     const healBySrc: Record<string, number> = {};
     for (const e of dE){
-      const src = canonEntity(e.src);
+      const src = canonDyn(e.src);
       dmgBySrc[src] = (dmgBySrc[src]||0) + e.amount;
     }
     for (const e of hE){
-      const src = canonEntity(e.src);
+      const src = canonDyn(e.src);
       healBySrc[src] = (healBySrc[src]||0) + e.amount;
     }
     const actors = new Set<string>([...Object.keys(dmgBySrc), ...Object.keys(healBySrc)]);
@@ -1277,7 +1289,7 @@ setBaseRows(rwsCanon); setBaseTimeline(tl);
     const byActorPS: Record<string, number[]> = {};
     for (const e of dE){
       const sec = e.t;
-      const src = canonEntity(e.src);
+      const src = canonDyn(e.src);
       if (!byActorPS[src]) byActorPS[src] = [];
       byActorPS[src][sec] = (byActorPS[src][sec]||0) + e.amount;
     }
@@ -1287,7 +1299,7 @@ setBaseRows(rwsCanon); setBaseTimeline(tl);
     const pa: PerAbility = {};
     const pat: PerAbilityTargets = {};
     for (const e of dE){
-      const actor = canonEntity(e.src);
+      const actor = canonDyn(e.src);
       const target = canonEntity(e.dst);
       let abil = normalizeAbilityName(e.ability);
 // Keep aggregation key normalized without suffix; label in UI instead.
@@ -1308,7 +1320,7 @@ setBaseRows(rwsCanon); setBaseTimeline(tl);
     const takenTotal: Record<string, number> = {};
     const takenBy: Record<string, Record<string, number>> = {};
     for (const e of dE){
-      const src = canonEntity(e.src);
+      const src = canonDyn(e.src);
       const dst = canonEntity(e.dst);
       if (src === dst) continue; // ignore self damage
       takenTotal[dst] = (takenTotal[dst]||0) + e.amount;
@@ -1378,7 +1390,7 @@ setBaseRows(rwsCanon); setBaseTimeline(tl);
       .filter(r => ALLOWED_CLASSES.has(String(inferredClasses[r.name]).toLowerCase()))
       .map(r => r.name)
   ), [rows, inferredClasses, ALLOWED_CLASSES]);
-  const listAPM = useMemo(()=> actionsPerMinute(rows, actionsByActor, (segIndex>=0 && segments[segIndex]) ? (segments[segIndex].end - segments[segIndex].start + 1) : duration), [rows, actionsByActor, duration, segIndex, segments]);
+  const listAPM = useMemo(() => actionsPerMinute(perSrc, timeline, duration), [perSrc, timeline, duration, segIndex, segments]);
 
   const takenFor = useMemo(()=> {
     const who = (compareOn && (pA || pB)) ? (pA || pB) : '';

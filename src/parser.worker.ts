@@ -199,6 +199,10 @@ function canonicalizeNPCName(name: string) {
 const DEFAULT_ALIASES: Record<string, string> = {
   "Shepard EffectMass": "Shepard",
   "Lurcio Leering-Creeper": "Lurcio",
+  // --- Canonical player aliases (merge split names) ---
+  "Colt": "Colt Sutran",
+  "colt": "Colt Sutran",
+  "Colt Sutran": "Colt Sutran"
 };
 
 function stripJunk(s: string): string {
@@ -217,6 +221,15 @@ function normalizeActorAlias(
 
   // Case-insensitive alias lookup
   const lc = original.toLowerCase();
+
+// Global canonical overrides (e.g., "colt" -> "Colt Sutran")
+const byCanon = ENTITY_CANON[lc] || ENTITY_CANON[original];
+if (byCanon) {
+  aliases[lc] = byCanon;
+  aliases[original] = byCanon;
+  return byCanon;
+}
+
   if (aliases[original]) return aliases[original];
   if (aliases[lc]) return aliases[lc];
 
@@ -258,6 +271,19 @@ function normalizeActorAlias(
   return original;
 }
 
+
+
+// Canonical map (lowercase) for quick lookups at parse- and merge-time
+const ENTITY_CANON: Record<string,string> = {
+  'colt': 'Colt Sutran',
+  'colt sutran': 'Colt Sutran',
+};
+
+function canonName(name: string): string {
+  const s = (name || '').trim();
+  const lc = s.toLowerCase();
+  return ENTITY_CANON[lc] || s;
+}
 // ---------- Worker ----------
 self.onmessage = async (ev: MessageEvent<any>) => {
   try {
@@ -310,7 +336,58 @@ self.onmessage = async (ev: MessageEvent<any>) => {
     const deathEvents: Array<{ t: number; name: string }> = []; // DECLARED
     const unparsed: string[] = [];
 
-    const dpsByActor: Record<string, number[]> = {};
+    
+
+// === Merge helpers (fold series/ability maps by canonical name) ===
+function mergeSeriesMap(map: Record<string, number[]>): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const [name, series] of Object.entries(map || {})) {
+    const key = canonName(name);
+    const dest = out[key] || [];
+    const n = Math.max(dest.length, series.length);
+    const merged: number[] = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) merged[i] = (dest[i] || 0) + (series[i] || 0);
+    out[key] = merged;
+  }
+  return out;
+}
+function mergePerAbilityMap(map: any): any {
+  const out: any = {};
+  for (const [src, abil] of Object.entries(map || {})) {
+    const key = canonName(src);
+    const dest = out[key] || {};
+    for (const [ability, stats] of Object.entries(abil as any)) {
+      const cur = dest[ability] || { hits:0, dmg:0, max:0 };
+      cur.hits += (stats as any).hits || 0;
+      cur.dmg  += (stats as any).dmg || 0;
+      if ((stats as any).max > cur.max) cur.max = (stats as any).max;
+      dest[ability] = cur;
+    }
+    out[key] = dest;
+  }
+  return out;
+}
+function mergePerAbilityTargetsMap(map: any): any {
+  const out: any = {};
+  for (const [src, abil] of Object.entries(map || {})) {
+    const key = canonName(src);
+    const dest = out[key] || {};
+    for (const [ability, targets] of Object.entries(abil as any)) {
+      const tgtDest = dest[ability] || {};
+      for (const [dst, stats] of Object.entries(targets as any)) {
+        const cur = tgtDest[dst] || { hits:0, dmg:0, max:0 };
+        cur.hits += (stats as any).hits || 0;
+        cur.dmg  += (stats as any).dmg || 0;
+        if ((stats as any).max > cur.max) cur.max = (stats as any).max;
+        tgtDest[dst] = cur;
+      }
+      dest[ability] = tgtDest;
+    }
+    out[key] = dest;
+  }
+  return out;
+}
+const dpsByActor: Record<string, number[]> = {};
     const hpsByActor: Record<string, number[]> = {};
 
     const perAbility: PerAbility = {};
@@ -706,24 +783,25 @@ self.onmessage = async (ev: MessageEvent<any>) => {
     }
 
     // rows & timeline aggregates
-    const actors = new Set<string>([
-      ...Object.keys(dpsByActor),
-      ...Object.keys(hpsByActor),
-    ]);
+    
+// Fold aliases by canonical name before deriving actors/rows
+const dpsCanon = mergeSeriesMap(dpsByActor);
+const hpsCanon = mergeSeriesMap(hpsByActor);
+const actors = new Set<string>([...Object.keys(dpsCanon), ...Object.keys(hpsCanon)]);
     const rows: PlayerRow[] = [];
     const tl: Array<{ t: number; dps: number; hps: number }> = [];
     for (let sec = 0; sec <= maxAbs; sec++) {
       let d = 0,
         h = 0;
-      for (const a of Object.keys(dpsByActor)) d += dpsByActor[a][sec] || 0;
-      for (const a of Object.keys(hpsByActor)) h += hpsByActor[a][sec] || 0;
+      for (const a of Object.keys(dpsCanon)) d += dpsCanon[a][sec] || 0;
+      for (const a of Object.keys(hpsCanon)) h += hpsCanon[a][sec] || 0;
       tl.push({ t: sec, dps: d, hps: h });
     }
     for (const a of actors) {
       let d = 0,
         h = 0;
-      const dps = dpsByActor[a] || [];
-      const hps = hpsByActor[a] || [];
+      const dps = dpsCanon[a] || [];
+      const hps = hpsCanon[a] || [];
       for (let sec = 0; sec <= maxAbs; sec++) {
         d += dps[sec] || 0;
         h += hps[sec] || 0;
@@ -779,9 +857,9 @@ self.onmessage = async (ev: MessageEvent<any>) => {
     const payload = {
       rows,
       tl,
-      perSrc: dpsByActor,
-      perAbility,
-      perAbilityTargets,
+      perSrc: dpsCanon,
+      perAbility: mergePerAbilityMap(perAbility),
+      perAbilityTargets: mergePerAbilityTargetsMap(perAbilityTargets),
       perTaken,
       perTakenBy,
       defense: perDef, // raw tallies

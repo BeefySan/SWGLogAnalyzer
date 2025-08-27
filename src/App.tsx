@@ -684,6 +684,34 @@ const ENTITY_CANON: Record<string,string> = Object.fromEntries([
 
 function canonEntity(name:string){ const key = normName(name); return ENTITY_CANON[key] || name; }
 
+/* === Canonical merge helpers (combine aliases like "Colt" and "Colt Sutran") === */
+function mergeRowsByCanon(rows: PlayerRow[]): PlayerRow[] {
+  const map: Record<string, PlayerRow> = {};
+  for (const r of rows || []) {
+    const key = canonEntity(r.name || '');
+    const cur = map[key] || { name: key, profession: r.profession, damageDealt: 0, healingDone: 0, avgDps: 0 };
+    cur.damageDealt += Number(r.damageDealt || 0);
+    cur.healingDone += Number(r.healingDone || 0);
+    cur.avgDps = Math.max(Number(cur.avgDps||0), Number(r.avgDps||0));
+    if (!cur.profession && r.profession) cur.profession = r.profession;
+    map[key] = cur;
+  }
+  return Object.values(map);
+}
+function mergePerSrcByCanon(perSrc: Record<string, number[]>): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const [name, series] of Object.entries(perSrc || {})) {
+    const key = canonEntity(name);
+    const dest = out[key] || [];
+    const n = Math.max(dest.length, series.length);
+    const merged: number[] = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) merged[i] = (dest[i] || 0) + (series[i] || 0);
+    out[key] = merged;
+  }
+  return out;
+}
+
+
 /* ========================= Helpers for charts & ability merging ========================= */
 
 function ClassLegend(){
@@ -1077,8 +1105,12 @@ w.onmessage = (ev:any)=>{
         const { pa: basePaNorm, pat: basePatNorm } =
           mergeNormalizedAbilities(perAbility || {}, pat || {});
 
-        setBaseRows(rws); setBaseTimeline(tl);
-        setBasePerSrc(perSrc||{});
+        
+// --- Canonicalize names (merge aliases like "Colt" & "Colt Sutran") ---
+const rwsCanon = mergeRowsByCanon(rws || []);
+const perSrcCanon = mergePerSrcByCanon(perSrc || {});
+setBaseRows(rwsCanon); setBaseTimeline(tl);
+        setBasePerSrc(perSrcCanon);
         setBasePerAbility(basePaNorm);
         setBasePerAbilityTargets(basePatNorm);
         setBasePerTaken(perTaken||{});

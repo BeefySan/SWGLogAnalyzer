@@ -357,7 +357,7 @@ self.onmessage = async (ev: MessageEvent<any>) => {
     ){
       // Guard: drop non-realistic single-hit damage (> 60k)
       const MAX_REALISTIC_HIT = 60000;
-      if ((amount ?? 0) > MAX_REALISTIC_HIT) { return; }
+      if ((amount ?? 0) > MAX_REALISTIC_HIT && !looksLikeNPC(src)) { return; }
 
       const abilityKey = normalizeAbilityName(abilityRaw || 'attack');
 

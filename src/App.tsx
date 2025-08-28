@@ -891,7 +891,9 @@ function TopRibbon(props:{
 export default function App(){
   // raw/unfiltered results from worker
 const [timelineStep, setTimelineStep] = useState<number>(1);
-  const [baseRows, setBaseRows] = useState<PlayerRow[]>([]);
+  
+  const [actorsSeen, setActorsSeen] = useState<string[]>([]);
+const [baseRows, setBaseRows] = useState<PlayerRow[]>([]);
   // Allowed player professions
   const ALLOWED_CLASSES = useMemo(() => new Set([
     'Jedi','Bounty Hunter','Commando','Officer','Spy','Medic','Smuggler','Entertainer','Trader'
@@ -1094,7 +1096,7 @@ w.onmessage = (ev:any)=>{
           rows:rws, tl, perSrc, perAbility, perAbilityTargets:pat,
           perTaken, perTakenBy, debug, duration,
           damageEvents, healEvents, deathEvents
-        } = msg.payload;
+        , actors: actorsFromWorker} = msg.payload;
 
         const { pa: basePaNorm, pat: basePatNorm } =
           mergeNormalizedAbilities(perAbility || {}, pat || {});
@@ -1110,6 +1112,7 @@ w.onmessage = (ev:any)=>{
         setDeathEvents(deathEvents||[]);
         setDuration(duration||0);
         setDebug(debug);
+        setActorsSeen(Array.isArray(actorsFromWorker) ? actorsFromWorker : []);
 
         const segs = deriveSegments(tl, damageEvents||[], idleGap);
         setSegments(segs);
@@ -1373,14 +1376,45 @@ const canonDyn = (n:string) => {
 /* -------------------- selectors & memo -------------------- */
 
   // Alphabetize and de-duplicate the comparison dropdown
-  const names = useMemo(()=>{
-    const bad = /^(with|using)\s/i;
-    const arr = rows.map(r=>r.name).filter(n=>!bad.test(n));
-    const uniq = Array.from(new Set(arr));
-    return uniq.sort((a,b)=> a.localeCompare(b, undefined, {sensitivity:'base'}));
-  }, [rows]);
+  // Alphabetize and de-duplicate the comparison dropdown
+  const names = useMemo(() => {
+    const bad  = /^(with|using)\s/i;
+    const keep = /^(Element of\s+(Acid|Cold|Electricity|Heat))$/i;
 
-  const listDamage = useMemo(()=> barData(rows, metric), [rows, metric]);
+    const clean = (s: string) => (s || '')
+      .replace(/\s+and\s.+$/i,'')
+      .replace(/\([^\)]*\)/g,'')
+      .replace(/\s{2,}/g,' ')
+      .trim();
+
+    const keyOf = (s: string) => clean(s)
+      .toLowerCase()
+      .replace(/\./g,'')                 // strip periods
+      .replace(/^cmdr\s*/, 'commander ') // normalize Cmdr variants
+      .replace(/\s+/g,' ')               // collapse spaces
+      .replace(/^an\s+/, 'an ')          // normalize An/an
+      .trim();
+
+    const fromRows   = (rows ?? []).map(r => r.name);
+    const fromTaken  = Object.keys(perTaken ?? {});
+    const fromActors = actorsSeen ?? [];
+    const arr  = [...fromRows, ...fromTaken, ...fromActors].map(clean);
+
+    const pick = new Map<string,string>();
+    for (const n of arr) {
+      if (!n || (bad.test(n) && !keep.test(n))) continue;
+      const k = keyOf(n);
+      const cur = pick.get(k);
+      if (!cur) { pick.set(k, n); continue; }
+      const prefUpper = /^[A-Z]/.test(n) && !/^[A-Z]/.test(cur);
+      const longer    = n.length > cur.length;
+      if (prefUpper || longer) pick.set(k, n);
+    }
+
+    return Array.from(pick.values()).sort((a,b)=> a.localeCompare(b, undefined, {sensitivity:'base'}));
+  }, [rows, perTaken, actorsSeen]);
+const listDamage = useMemo(()=> barData(rows, metric), [rows, metric]);
+(()=> barData(rows, metric), [rows, metric]);
   const listHealing = useMemo(()=> barData(rows, 'healingDone'), [rows]);
   const inferredClasses = useMemo(()=> inferClasses(rows, perAbility), [rows, perAbility]);
 

@@ -1314,10 +1314,12 @@ const NPC_TO_INSTANCE: Array<{ npc:string; inst:string }> = [
   { npc: 'ig-88', inst: 'IG-88' },
   { npc: 'exar kun', 'inst': 'Exar Kun' },
   { npc: 'cmdr kenkirk', inst: 'ISD' },
+  { npc: 'blacksun boarder', inst: 'ISD' },
   { npc: 'commander kenkirk', inst: 'ISD' },
   { npc: 'krix swiftshadow', inst: 'ISD' },
   { npc: 'harwakokok the mighty', inst: 'Avatar Hardmode' },
-];
+  { npc: 'HK-47', inst: 'HK-47' },
+	
 const NPC_MAP: Record<string,string> = Object.fromEntries(NPC_TO_INSTANCE.map(x=> [normName(x.npc), x.inst]));
 
 /* ----- Entity canonicalization (merge name variants in aggregation) ----- */

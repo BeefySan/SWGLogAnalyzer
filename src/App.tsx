@@ -1318,7 +1318,8 @@ const NPC_TO_INSTANCE: Array<{ npc:string; inst:string }> = [
   { npc: 'commander kenkirk', inst: 'ISD' },
   { npc: 'krix swiftshadow', inst: 'ISD' },
   { npc: 'harwakokok the mighty', inst: 'Avatar Hardmode' },
-  { npc: 'HK-47', inst: 'HK-47' },
+  { npc: 'hk-47', inst: 'HK-47' },
+  { npc: 'malan a sith shadow master', inst: 'Malan' },
 	
 const NPC_MAP: Record<string,string> = Object.fromEntries(NPC_TO_INSTANCE.map(x=> [normName(x.npc), x.inst]));
 

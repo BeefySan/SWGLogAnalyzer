@@ -1220,7 +1220,7 @@ const ABILITY_CLASS_MAP: Record<string,string> = {
   // Spy
   'razor slash':'Spy','blaster burst':'Spy',"assassin's mark":'Spy','assassinate':'Spy',"spy's fang":'Spy',
   // Medic
-  'bacta burst':'Medic','Bacta Spray (Mark 6)':'Medic','Bacta Ampule (Mark 6)':'Medic','vital strike':'Medic',
+  'bacta burst':'Medic','bacta spray mark 6':'Medic','bacta ampule mark 6':'Medic','vital strike':'Medic','nerve gas':'Medic',
 };
 
 // aggressive normalizer to merge variants like “… and hits / glances / crits / punishing blows”, ranks and fluff

@@ -3,6 +3,7 @@ import ErrorBoundary from "./ErrorBoundary";
 import DpsPopoutButton from "./components/DpsPopoutButton";
 import { ResponsiveContainer, AreaChart, Area, LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip, Legend, BarChart, Bar, LabelList, Cell, Sankey, ReferenceLine, ReferenceArea } from "recharts";
 import EncounterSummary from "./components/EncounterSummary";
+import PlayerSummary from "./components/PlayerSummary";
 import StarLoader from './StarLoader';
 
 // --- Bigger, centered label for death-flag ReferenceLines ---
@@ -188,6 +189,8 @@ const SW_CSS = /* css */ `
 
 /* --- Recharts tooltip: solid dark HUD panel for readability --- */
 .swg-theme .recharts-tooltip-wrapper { z-index: 1000; }
+
+.swg-theme .recharts-wrapper{ overflow: visible !important; }
 .swg-theme .recharts-default-tooltip {
   background: rgba(10,16,28,.98) !important;
   border: 1px solid rgba(120,170,255,.45) !important;
@@ -204,6 +207,254 @@ const SW_CSS = /* css */ `
 .swg-theme .recharts-tooltip-item { color: var(--text) !important; }
 .swg-theme .recharts-tooltip-item-name { color: var(--muted) !important; }
 .swg-theme .recharts-tooltip-item-value { color: #d8ecff !important; font-weight: 700; }
+
+/* ======================
+   HoloNet bottom charts
+   ====================== */
+.swg-theme .holo-panel{
+  position: relative;
+  overflow: visible;
+  isolation: isolate;
+  box-shadow: 0 0 0 1px rgba(140, 200, 255, .18), 0 14px 48px rgba(0,0,0,.55);
+}
+.swg-theme .holo-panel::before{
+  content: "";
+  position: absolute;
+  inset: -2px;
+  z-index: 0;
+  
+  pointer-events:none;
+background:
+    radial-gradient(900px 360px at 20% -10%, rgba(110, 190, 255, .20), transparent 55%),
+    radial-gradient(800px 420px at 85% 10%, rgba(85, 255, 225, .12), transparent 60%),
+    linear-gradient(135deg, rgba(255,255,255,.06), transparent 50%),
+    linear-gradient(0deg, rgba(0,0,0,.28), rgba(0,0,0,.28));
+  filter: blur(.2px);
+}
+.swg-theme .holo-panel::after{
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  
+  pointer-events:none;
+background:
+    repeating-linear-gradient(
+      to bottom,
+      rgba(120,200,255,.08) 0px,
+      rgba(120,200,255,.08) 1px,
+      rgba(0,0,0,0) 3px,
+      rgba(0,0,0,0) 7px
+    );
+  opacity: .30;
+  mix-blend-mode: overlay;
+  animation: holoScan 6s linear infinite;
+}
+
+.swg-theme .holo-content{ position: relative; z-index: 1; }
+
+.swg-theme .holoChartFrame{ position: relative; }
+.swg-theme .holoChartFrame{ overflow: visible; }
+.swg-theme .holo-scanlines{
+  pointer-events:none;
+  position:absolute;
+  inset: 12px 12px 18px 12px;
+  border-radius: 16px;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(110, 190, 255, .10) 0px,
+    rgba(110, 190, 255, .10) 1px,
+    rgba(0,0,0,0) 3px,
+    rgba(0,0,0,0) 9px
+  );
+  opacity: .16;
+  mix-blend-mode: overlay;
+  animation: holoScan 8s linear infinite;
+ }
+.swg-theme .holo-vignette{
+  pointer-events:none;
+  position:absolute;
+  inset: 0;
+  border-radius: 16px;
+  background: radial-gradient(900px 300px at 50% 10%, rgba(90, 255, 230, .10), transparent 55%),
+    radial-gradient(900px 420px at 50% 100%, rgba(0, 0, 0, .35), transparent 60%);
+  opacity: .8;
+ }
+
+.swg-theme .panelTitle{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  letter-spacing: .3px;
+  text-transform: none;
+}
+.swg-theme .holoDot{
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(90, 220, 255, .95);
+  box-shadow: 0 0 0 2px rgba(90, 220, 255, .20), 0 0 18px rgba(90, 220, 255, .65);
+  animation: holoPulse 1.8s ease-in-out infinite;
+}
+
+.swg-theme .holo-chartwrap{ position: relative; }
+.swg-theme .holo-grid{
+  position: absolute;
+  inset: 10px 12px 14px 12px;
+  z-index: 0;
+  background:
+    linear-gradient(to right, rgba(120,200,255,.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(120,200,255,.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  opacity: .35;
+  filter: blur(.15px);
+  pointer-events: none;
+}
+.swg-theme .holo-sweep{
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: linear-gradient(
+    120deg,
+    transparent 0%,
+    rgba(140, 220, 255, .10) 38%,
+    rgba(140, 220, 255, .22) 45%,
+    rgba(140, 220, 255, .10) 52%,
+    transparent 75%
+  );
+  transform: translateX(-60%);
+  animation: holoSweep 5.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* --- Axis footer (Holonet briefing) --- */
+.swg-theme .holoAxisFooterWrap{
+  position: relative;
+  margin-top: 10px;
+  padding: 10px 10px 8px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(8,18,35,.92), rgba(6,12,22,.82));
+  border: 1px solid rgba(120,220,255,.30);
+  box-shadow: 0 14px 32px rgba(0,0,0,.55), 0 0 0 2px rgba(98,176,255,.10) inset;
+  overflow: hidden;
+}
+.swg-theme .holoAxisFooterScan{
+  position: absolute;
+  inset: -10px -20px;
+  background: linear-gradient(90deg, transparent, rgba(90,220,255,0.14), transparent);
+  transform: translateX(-40%);
+  animation: holonetFooterScan 2.9s ease-in-out infinite;
+  animation-play-state: paused;
+  will-change: transform;
+  mix-blend-mode: screen;
+  pointer-events: none;
+  opacity: .75;
+}
+
+.holoAxisFooterWrap.isActive .holoAxisFooterScan{ animation-play-state: running; }
+@keyframes holonetFooterScan{
+  0% { transform: translateX(-45%); opacity: .20; }
+  35% { opacity: .55; }
+  70% { opacity: .35; }
+  100% { transform: translateX(45%); opacity: .20; }
+}
+.swg-theme .holoAxisFooterRow{
+  position: relative;
+  z-index: 1;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:10px;
+}
+.swg-theme .holoAxisFooterLabel{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: rgba(190, 235, 255, 0.95);
+  text-shadow: 0 0 14px rgba(70, 190, 255, 0.25);
+}
+.swg-theme .holoAxisFooterChip{
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  display:grid;
+  place-items:center;
+  cursor: help;
+  background: rgba(30, 80, 120, 0.36);
+  border: 1px solid rgba(120, 220, 255, 0.42);
+  box-shadow: 0 0 14px rgba(70, 190, 255, 0.16);
+  color: rgba(230, 250, 255, 0.95);
+  font-size: 12px;
+  font-weight: 900;
+  user-select: none;
+}
+.swg-theme .holoAxisFooterTip{
+  position:absolute;
+  left:50%;
+  bottom: calc(100% + 10px);
+  transform: translateX(-50%);
+  width: 360px;
+  max-width: min(420px, 88vw);
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(10, 30, 55, 0.96), rgba(8, 18, 35, 0.94));
+  border: 1px solid rgba(120, 220, 255, 0.32);
+  box-shadow: 0 20px 48px rgba(0,0,0,0.55), 0 0 22px rgba(70, 190, 255, 0.18);
+  color: rgba(220, 245, 255, 0.98);
+  font-size: 12px;
+  line-height: 1.35;
+  letter-spacing: .02em;
+  z-index: 50;
+}
+.swg-theme .holoAxisFooterTipTitle{
+  font-weight: 900;
+  margin-bottom: 6px;
+  color: rgba(170, 235, 255, 0.98);
+}
+.swg-theme .holoAxisFooterTipPointer{
+  position:absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+  width: 14px;
+  height: 14px;
+  background: rgba(8, 18, 35, 0.94);
+  border-left: 1px solid rgba(120, 220, 255, 0.32);
+  border-bottom: 1px solid rgba(120, 220, 255, 0.32);
+  margin-top: -7px;
+}
+
+.swg-theme .holo-pill{ animation: pillPop 520ms cubic-bezier(.2,.9,.2,1) both; }
+.swg-theme .holo-pill-text{ animation: textGlow 1.8s ease-in-out infinite; }
+
+@keyframes holoScan{
+  0%{ transform: translateY(-18%); }
+  100%{ transform: translateY(18%); }
+}
+@keyframes holoPulse{
+  0%,100%{ transform: scale(1); opacity: .9; }
+  50%{ transform: scale(1.25); opacity: 1; }
+}
+@keyframes holoSweep{
+  0%{ transform: translateX(-70%); opacity: .0; }
+  15%{ opacity: .55; }
+  50%{ transform: translateX(35%); opacity: .45; }
+  70%{ opacity: .25; }
+  100%{ transform: translateX(95%); opacity: 0; }
+}
+@keyframes pillPop{
+  0%{ transform: translate3d(-6px, 0, 0) scale(.92); opacity: 0; }
+  60%{ transform: translate3d(0,0,0) scale(1.04); opacity: 1; }
+  100%{ transform: translate3d(0,0,0) scale(1); opacity: 1; }
+}
+@keyframes textGlow{
+  0%,100%{ filter: drop-shadow(0 0 6px rgba(165,220,255,.35)); }
+  50%{ filter: drop-shadow(0 0 10px rgba(165,220,255,.75)); }
+}
 `;
 
 
@@ -211,19 +462,30 @@ const SW_CSS = /* css */ `
 // --- Toolbar / Ribbon styles ---
 const RIBBON_CSS = /* css */ `
 .ribbon{
-  max-width:2300px; margin:0 auto 8px;
-  display:grid; grid-template-columns:auto auto auto auto;
-  justify-content:center; align-items:center; gap:10px;
+  max-width:2300px;
+  margin:0 auto 8px;
+  width:100%;
+  display:grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items:center;
+  gap:14px;
+
   background: var(--panel,#0e1726);
   border:1px solid var(--panel-border,#1b2a3d);
-  border-radius:16px; padding:12px 14px;
+  border-radius:18px;
+  padding:18px 22px;
   box-shadow: 0 6px 24px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.04);
 }
-.ribbon .group{display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
-.ribbon .title{font-weight:700; letter-spacing:.2px; color:var(--text,#cfe3ff); display:flex; gap:10px}
+.ribbon > *{min-width:0;}
+.ribbon .group{display:flex; align-items:center; justify-content:center; gap:14px; flex-wrap:nowrap; min-width:0;}
+.ribbon .group.left{justify-self:start;}
+.ribbon .group.center{justify-self:center;}
+.ribbon .group.right{justify-self:end;}
+
+.ribbon .title{font-weight:700; letter-spacing:.2px; color:var(--text,#cfe3ff); display:flex; align-items:center; gap:10px; white-space:nowrap;}
 
 /* File pill */
-.filepill{display:flex; align-items:center; gap:12px;
+.filepill{display:flex; align-items:center; gap:12px; max-width:520px; min-width:0;
   background: var(--panel-2,#0c1624);
   border:1px solid var(--panel-border,#1b2a3d);
   padding:10px 14px; border-radius:999px;
@@ -284,14 +546,18 @@ const RIBBON_CSS = /* css */ `
 const RIBBON_EXTRA = /* css */ `
 .center-stack{display:flex;flex-direction:column;align-items:center;gap:12px;}
 .center-toggle-row{display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap;}
-.ab-box{display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap;
+.ab-box{display:flex;flex-direction:column;gap:10px;align-items:stretch;justify-content:center;flex-wrap:nowrap; min-width:0;
   background: var(--panel-2,#0c1624);
   border:1px solid var(--panel-border,#1b2a3d);
   border-radius:12px;
   padding:10px 12px;
   box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
 }
-.ab-box select{height:44px; min-width:260px; font-size:16px; border-radius:12px;}
+.ab-box select{height:44px; width:240px; min-width:240px; max-width:240px; font-size:16px; border-radius:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.ab-row{display:flex; gap:12px; align-items:center; justify-content:center; flex-wrap:nowrap;}
+.ab-actions{display:flex; gap:12px; align-items:center; justify-content:flex-end;}
+.ab-actions .btn{height:44px;}
+
 `;
 
 
@@ -299,7 +565,7 @@ const ENC_CSS = /* css */ `
 /* Encounter Summary button — flaming red pulse */
 .swg-theme .enc-btn{
   position: relative;
-  padding: 75px 44px;
+  padding: 52px 34px;
   border-radius: 999px;
   border: 1px solid rgba(120,170,255,.55);
   background-image: var(--bg-image, linear-gradient(180deg, rgba(33,212,253,.18), rgba(10,60,120,.24)));
@@ -308,8 +574,10 @@ const ENC_CSS = /* css */ `
   background-attachment: fixed;
   color:#eaf3ff;
   font-weight:800;
+  font-size: 13px;
   letter-spacing:.08em;
   text-transform:uppercase;
+  white-space: nowrap;
   cursor:pointer;
   overflow:hidden;
   /* subtle base glow so it still looks good between pulses */
@@ -330,8 +598,7 @@ const ENC_CSS = /* css */ `
     radial-gradient(60% 120% at 50% 105%, rgba(255,120,40,.60), rgba(255,0,0,0) 70%),
     radial-gradient(42% 90%  at 30% 110%, rgba(255,80,20,.55),  rgba(255,0,0,0) 62%),
     radial-gradient(42% 90%  at 70% 110%, rgba(255,80,20,.55),  rgba(255,0,0,0) 62%);
-  filter: blur(12px) saturate(1.2);
-  opacity:.65;
+  filter: none; opacity:.65;
   pointer-events:none;
   animation: enc-flame 2.2s ease-in-out infinite;
 }
@@ -357,8 +624,8 @@ const ENC_CSS = /* css */ `
 
 /* Subtle rise + flicker */
 @keyframes enc-flame{
-  0%,100% { transform: translateY(0)    scale(1);    filter: blur(12px) saturate(1.15); opacity:.55; }
-  50%     { transform: translateY(-6px) scale(1.05); filter: blur(14px) saturate(1.35); opacity:.85; }
+  0%,100% { transform: translateY(0)    scale(1);    filter: none; opacity:.55; }
+  50%     { transform: translateY(-6px) scale(1.05); filter: none; opacity:.85; }
 }
 
 /* Glow breath */
@@ -379,6 +646,83 @@ const ENC_CSS = /* css */ `
   }
 }
 `;
+
+
+const PS_CSS = /* css */ `
+/* Player Summary button — imperial blue pulse */
+.swg-theme .ps-btn{
+  position: relative;
+  padding: 52px 34px;
+  border-radius: 999px;
+  border: 1px solid rgba(120,170,255,.55);
+  background-image: var(--bg-image, linear-gradient(180deg, rgba(98,176,255,.22), rgba(10,60,120,.24)));
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+  color:#eaf3ff;
+  font-weight:800;
+  font-size: 13px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  white-space: nowrap;
+  cursor:pointer;
+  overflow:hidden;
+  box-shadow:
+    0 0 0 1px rgba(0,0,0,.35) inset,
+    0 0 22px rgba(33, 212, 253, .22);
+  transition: transform .08s ease, filter .12s ease;
+  z-index: 2;
+}
+.swg-theme .ps-btn::before{
+  content:"";
+  position:absolute; inset:-10px;
+  border-radius:999px;
+  background:
+    radial-gradient(60% 120% at 50% 105%, rgba(98,176,255,.55), rgba(0,0,0,0) 70%),
+    radial-gradient(42% 90%  at 30% 110%, rgba(33,212,253,.45),  rgba(0,0,0,0) 62%),
+    radial-gradient(42% 90%  at 70% 110%, rgba(33,212,253,.45),  rgba(0,0,0,0) 62%);
+  filter: none; opacity:.60;
+  pointer-events:none;
+  animation: ps-flare 2.2s ease-in-out infinite;
+}
+.swg-theme .ps-btn::after{
+  content:"";
+  position:absolute; inset:-2px;
+  border-radius:999px;
+  pointer-events:none;
+  background: linear-gradient(180deg, rgba(0,0,0,.20), rgba(0,0,0,.44));
+  box-shadow:
+    0 0 0 2px rgba(98,176,255,.26) inset,
+    0 0 22px rgba(33,212,253,.40),
+    0 0 60px rgba(98,176,255,.22);
+  animation: ps-pulse 1.8s ease-in-out infinite;
+}
+.swg-theme .ps-btn:hover{
+  filter: brightness(1.08);
+  transform: translateY(-1px) scale(1.01);
+}
+@keyframes ps-flare{
+  0%,100% { transform: translateY(0)    scale(1);    filter: none; opacity:.55; }
+  50%     { transform: translateY(-6px) scale(1.05); filter: none; opacity:.85; }
+}
+@keyframes ps-pulse{
+  0%,100% {
+    box-shadow:
+      0 0 0 2px rgba(98,176,255,.26) inset,
+      0 0 22px rgba(33,212,253,.40),
+      0 0 60px rgba(98,176,255,.22);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px rgba(33,212,253,.45) inset,
+      0 0 40px rgba(33,212,253,.70),
+      0 0 120px rgba(98,176,255,.50);
+    transform: scale(1.02);
+  }
+}
+`;
+
 // ---- Elemental support (injected) ----
 type ElementalBreakdown = Record<string, number>;
 
@@ -494,6 +838,289 @@ const nf0  = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const fmt0 = (v: number) => nf0.format(Math.round(v || 0));
 const pct  = (n: number, d: number) => (d > 0 ? (n / d) * 100 : 0);
 
+// Bar label rendered in a fixed right-hand "value column" (prevents overlap with bars)
+function barValuePillOutsideRight(props: any) {
+  // Recharts label renderers can pass either {x,y,width,height} or {viewBox:{x,y,width,height}}
+  const { x, y, width, height, value, viewBox } = props ?? {};
+  const vb = viewBox ?? {};
+
+  const nx = Number.isFinite(x) ? x : (Number.isFinite(vb.x) ? vb.x : NaN);
+  const ny = Number.isFinite(y) ? y : (Number.isFinite(vb.y) ? vb.y : NaN);
+  const nw = Number.isFinite(width) ? width : (Number.isFinite(vb.width) ? vb.width : NaN);
+  const nh = Number.isFinite(height) ? height : (Number.isFinite(vb.height) ? vb.height : NaN);
+
+  const v = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(v) || v <= 0) return null;
+  if (!Number.isFinite(nx) || !Number.isFinite(ny) || !Number.isFinite(nw) || !Number.isFinite(nh)) return null;
+
+  // use the local formatter if present; fallback is comma-separated
+  const format = (n: number) => {
+    try {
+      return (typeof numberFormatterFn === 'function') ? numberFormatterFn(n) : n.toLocaleString();
+    } catch {
+      return n.toLocaleString();
+    }
+  };
+
+  const s = format(v);
+
+  const fontSize = Math.max(12, Math.min(16, nh * 0.62));
+
+  // pill size based on string length, clamped
+  const pillH = Math.max(18, Math.min(26, nh * 0.86));
+  const pillW = Math.max(56, Math.min(110, s.length * 8.7 + 26));
+
+  // place at the bar end, slightly outside to the right (or left if negative)
+  const dir = nw < 0 ? -1 : 1;
+  const endX = nx + nw;
+  const pad = 18; // extra breathing room (requested)
+  const cx = endX + dir * (pad + pillW / 2);
+  const cy = ny + nh / 2;
+
+  // little entrance animation
+  const animId = `pill-${Math.round(nx)}-${Math.round(ny)}-${Math.round(v)}`;
+  const idx = typeof props?.index === 'number' ? props.index : 0;
+  const animDelay = `${Math.min(240, idx * 22)}ms`;
+
+  return (
+    <g transform={`translate(${cx},${cy})`}>
+      <style>{`
+        @keyframes pillPop-${animId} {
+          0% { transform: scale(0.85); opacity: 0; }
+          100% { transform: scale(1); opacity: 1; }
+        }
+      
+/* === Holonet Timeline Frame === */
+.holoTimelineWrap{
+  position: relative;
+  border: 1px solid rgba(120,220,255,0.22);
+  border-radius: 18px;
+  overflow: hidden;
+}
+.holoTimelineWrap::before{
+  content:"";
+  position:absolute; inset:0;
+  pointer-events:none;
+  opacity:0.26;
+  background-image:
+    linear-gradient(rgba(120,220,255,0.10) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120,220,255,0.08) 1px, transparent 1px);
+  background-size: 24px 24px, 24px 24px;
+  mask-image: radial-gradient(90% 75% at 50% 35%, #000 58%, transparent 100%);
+}
+.holoTimelineWrap::after{
+  content:"";
+  position:absolute; inset:0;
+  pointer-events:none;
+  background:
+    radial-gradient(90% 70% at 50% 15%, rgba(90,220,255,0.07), transparent 60%),
+    radial-gradient(120% 140% at 50% 115%, rgba(0,0,0,0.55), transparent 58%);
+  opacity:0.95;
+}
+.holoTimelineNoise{
+  position:absolute; inset:0;
+  pointer-events:none;
+  opacity:0.025;
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(255,255,255,0.25),
+    rgba(255,255,255,0.25) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: overlay;
+}
+@keyframes holoTimelineScan {
+  0% { transform: translateY(-18%); opacity: 0; }
+  12% { opacity: 0.22; }
+  50% { opacity: 0.18; }
+  88% { opacity: 0.22; }
+  100% { transform: translateY(118%); opacity: 0; }
+}
+.holoTimelineScan{
+  position:absolute;
+  left:0; right:0;
+  height: 22%;
+  top: -22%;
+  pointer-events:none;
+  opacity:0;
+  background: linear-gradient(180deg, transparent, rgba(90,220,255,0.07), transparent);
+}
+.holoTimelineWrap:hover .holoTimelineScan,
+.holoTimelineWrap:focus-within .holoTimelineScan{
+  animation: holoTimelineScan 3.8s ease-in-out infinite;
+}
+/* Corner brackets */
+.holoCorner{
+  position:absolute;
+  width: 14px; height: 14px;
+  border: 1px solid rgba(120,220,255,0.38);
+  opacity: 0.65;
+  pointer-events:none;
+}
+.holoCorner.tl{ top:10px; left:10px; border-right:none; border-bottom:none; border-top-left-radius:6px;}
+.holoCorner.tr{ top:10px; right:10px; border-left:none; border-bottom:none; border-top-right-radius:6px;}
+.holoCorner.bl{ bottom:10px; left:10px; border-right:none; border-top:none; border-bottom-left-radius:6px;}
+.holoCorner.br{ bottom:10px; right:10px; border-left:none; border-top:none; border-bottom-right-radius:6px;}
+.holoTimelineTitle{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  font-weight:800;
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+  font-size:12px;
+  color: rgba(190,235,255,0.92);
+  text-shadow: 0 0 10px rgba(70,190,255,0.18);
+}
+.holoDot{
+  width:7px; height:7px; border-radius:999px;
+  background: rgba(90,220,255,0.9);
+  box-shadow: 0 0 12px rgba(90,220,255,0.45);
+}
+
+
+/* --- Abilities tab upgrade --- */
+.abilitiesCard { position: relative; overflow: hidden; }
+.abilitiesCard::before{
+  content:"";
+  position:absolute; inset:0;
+  background:
+    radial-gradient(900px 320px at 16% 10%, rgba(90,220,255,0.08), transparent 55%),
+    radial-gradient(700px 280px at 85% 0%, rgba(110,160,255,0.07), transparent 60%),
+    linear-gradient(180deg, rgba(12,22,36,0.12), transparent 35%);
+  pointer-events:none;
+}
+.abilitiesHeader{
+  position: sticky; top: 0; z-index: 3;
+  backdrop-filter: blur(10px);
+}
+.abilitiesScroll{
+  position: relative;
+  scrollbar-gutter: stable both-edges;
+}
+.abilitiesTable thead th{
+  position: sticky; top: 0; z-index: 2;
+  background: linear-gradient(180deg, rgba(10,18,30,0.92), rgba(10,18,30,0.70));
+  border-bottom: 1px solid rgba(120,220,255,0.14);
+}
+.abilitiesTable tbody tr{
+  transition: background 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+.abilitiesTable tbody tr:hover{
+  background: rgba(35,75,110,0.18);
+}
+.abilitiesTable tbody tr:nth-child(odd){
+  background: rgba(0,0,0,0.06);
+}
+.abilitiesTable tbody tr:hover .abilityBarFill{
+  filter: saturate(1.2);
+}
+.abilityCell{ width: 420px; min-width: 420px; }
+.abilityMain{
+  display:flex !important;
+  align-items:center;
+  gap:10px;
+  flex-wrap: nowrap;
+  min-width:0;
+}
+.abilityToggle{
+  display:inline-flex !important;
+  align-items:center;
+  justify-content:center;
+  width:26px;
+  height:22px;
+  padding: 0 !important;
+  border-radius: 8px !important;
+  background: rgba(20,48,72,0.30) !important;
+  border: 1px solid rgba(120,220,255,0.22) !important;
+  box-shadow: 0 0 12px rgba(70,190,255,0.08);
+  flex: 0 0 auto;
+}
+.abilityText{
+  flex: 1;
+  min-width: 0;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.abilityTopRow{ display:flex; align-items:center; gap:10px; }
+.abilityName{
+  font-weight: 800;
+  color: rgba(230,250,255,0.96);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.1;
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+.abilityTag{
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(120,220,255,0.22);
+  background: rgba(35,75,110,0.22);
+  color: rgba(170,235,255,0.92);
+}
+.abilityBar{
+  margin-top: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(120,220,255,0.10);
+  overflow: hidden;
+}
+.abilityBarFill{
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(70,200,255,0.85), rgba(150,220,255,0.30));
+  box-shadow: 0 0 14px rgba(70,190,255,0.16);
+  transition: width 220ms ease;
+}
+`}
+</style>
+      <g
+        style={{
+          transformOrigin: 'center',
+          animation: `pillPop-${animId} 260ms ease-out`,
+          animationDelay: animDelay,
+          animationFillMode: 'both',
+        }}
+      >
+        <rect
+          x={-pillW / 2}
+          y={-pillH / 2}
+          width={pillW}
+          height={pillH}
+          rx={pillH / 2}
+          ry={pillH / 2}
+          className="holo-pill"
+          fill="rgba(10, 14, 22, 0.92)" // solid, readable pill
+          stroke="rgba(255,255,255,0.10)"
+          strokeWidth={1}
+          filter="url(#holoGlow)"
+        />
+        <text
+          x={0}
+          y={fontSize * 0.36}
+          textAnchor="middle"
+          fontSize={fontSize}
+          fontWeight={800}
+          className="holo-pill-text"
+          fill="rgba(255,255,255,0.96)"
+          style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.65))' }}
+        >
+          {s}
+        </text>
+      </g>
+    </g>
+  );
+}
+
 // normalize a name & remove UI prefixes like "A: " / "B: "
 const norm = (s?: string) => (s ?? "").normalize("NFKC").trim().toLowerCase();
 const cleanName = (s?: string) =>
@@ -520,6 +1147,43 @@ type HealEvent = {
   ability: string;
   amount: number;
 };
+
+type UtilityEvent = { t:number; src:string; ability:string };
+
+function extractUtilityEventsFromPerforms(text: string): UtilityEvent[] {
+  if (!text) return [];
+  const lines = text.split(/\r?\n/);
+  const out: UtilityEvent[] = [];
+  // Example:
+  // [Combat]  16:27:51 Broly performs Bacta Ampule (Mark 6) on RekcuT.
+  // [Combat]  16:27:51 Greyian Lalo performs Tangle Bomb (Mark 3).
+  const re = /^\[Combat\]\s+(\d{2}):(\d{2}):(\d{2})\s+(.+?)\s+performs\s+(.+?)(?:\s+on\s+.+?)?\.?\s*$/i;
+  let minAbs: number | null = null;
+  const temp: Array<{abs:number; src:string; ability:string}> = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(re);
+    if (!m) continue;
+    const hh = Number(m[1]);
+    const mm = Number(m[2]);
+    const ss = Number(m[3]);
+    const src = String(m[4] || '').trim();
+    const ability = String(m[5] || '').trim();
+    if (!src || !ability) continue;
+    const abs = hh * 3600 + mm * 60 + ss;
+    if (minAbs === null || abs < minAbs) minAbs = abs;
+    temp.push({ abs, src, ability });
+  }
+  if (!temp.length) return out;
+  const base = minAbs ?? temp[0].abs;
+  for (const e of temp) {
+    out.push({ t: Math.max(0, e.abs - base), src: e.src, ability: e.ability });
+  }
+  return out;
+}
+
+
 
 type PerAbility = Record<string, Record<string, { hits:number; dmg:number; max:number }>>;
 type PerAbilityTargets = Record<string, Record<string, Record<string, { hits:number; dmg:number; max:number }>>>;
@@ -786,12 +1450,13 @@ function TopRibbon(props:{
   timelineStep:number; setTimelineStep:(n:number)=>void;
 
   onOpenSummary?: () => void;
+  onOpenPlayerSummary?: () => void;
 }){
   const [showPaste, setShowPaste] = React.useState(false);
   return (
     <>
       <div className="ribbon">
-        <div className="group">
+        <div className="group left">
           <div className="chip" title="Reduce timeline render points to improve FPS">
             <span>Timeline fidelity</span>
             <select className="input" value={props.timelineStep} onChange={e=>props.setTimelineStep(Number(e.target.value)||1)}>
@@ -815,58 +1480,53 @@ function TopRibbon(props:{
         </div>
 
         
-<div className="group" style={{ justifyContent: 'center', minWidth: 260 }}>
-  <button
-    type="button"
-    className="enc-btn"
-    onClick={() => props.onOpenSummary && props.onOpenSummary()}
-    title="Open Encounter Summary"
-  >
-    ENCOUNTER SUMMARY
-  </button>
+<div className="group center" style={{ justifyContent: 'center', minWidth: 0 }}>
+  <div style={{ display:'flex', gap: 14, alignItems:'center', justifyContent:'center', flexWrap:'nowrap', whiteSpace:'nowrap' }}>
+    <button
+      type="button"
+      className="enc-btn"
+      onClick={props.onOpenSummary}
+      title="Open Encounter Summary"
+    >
+      ENCOUNTER SUMMARY
+    </button>
+
+    <button
+      type="button"
+      className="ps-btn"
+      onClick={props.onOpenPlayerSummary}
+      title="Open Player Summary"
+    >
+      PLAYER SUMMARY
+    </button>
+  </div>
 </div>
 
-<div className="group center-stack" style={{justifyContent:'center'}}>
-          <div className="segmented" role="tablist" aria-label="Metric">
-            {[
-              {label:"Damage Dealt", key:"damageDealt"},
-              {label:"Average DPS", key:"avgDps"},
-              {label:"Healing Done", key:"healingDone"},
-            ].map(x=>(
-              <button key={x.key}
-                className={"seg "+(props.metric===x.key ? "active": "")}
-                onClick={()=>props.setMetric(x.key as MetricKey)}>{x.label}</button>
-            ))}
-          </div>
-
-          <label className="chip">
-            <input type="checkbox" checked={props.collectUnparsed}
-              onChange={e=>props.setCollectUnparsed(e.target.checked)} />
-            Collect unparsed lines
-          </label>
-
-          <label className="chip">
+<div className="group right center-stack" style={{justifyContent:'center'}}>
+<label className="chip">
             <input type="checkbox" checked={props.compareOn}
               onChange={e=>props.setCompareOn(e.target.checked)} />
             Player comparison
           </label>
         
   <div className="ab-box">
-    <select disabled={!props.compareOn} value={props.pA} onChange={e=>props.setPA(e.target.value)}>
+    <div className="ab-row">
+      <select disabled={!props.compareOn} value={props.pA} onChange={e=>props.setPA(e.target.value)}>
       <option value="">A: Select player</option>
       {props.players.map(p=> <option key={"A"+p} value={p}>{p}</option>)}
     </select>
-    <select disabled={!props.compareOn} value={props.pB} onChange={e=>props.setPB(e.target.value)}>
+      <select disabled={!props.compareOn} value={props.pB} onChange={e=>props.setPB(e.target.value)}>
       <option value="">B: Select player</option>
       {props.players.map(p=> <option key={"B"+p} value={p}>{p}</option>)}
     </select>
+    </div>
+    <div className="ab-actions">
+      <button className="btn warn" disabled={!props.compareOn} onClick={props.onClearAB}>CLEAR A/B</button>
+      <DpsPopoutButton makeWorker={() => new Worker(new URL('./parser.worker.ts', import.meta.url), { type: 'module' })} />
+    </div>
   </div>
 </div>
-
-        <div className="group" style={{justifyContent:'flex-end'}}>
-
-          <button className="btn warn" disabled={!props.compareOn} onClick={props.onClearAB}>CLEAR A/B</button>
-          <DpsPopoutButton makeWorker={() => new Worker(new URL('./parser.worker.ts', import.meta.url), { type: 'module' })} />
+        <div className="group ribbon-right" style={{justifyContent:'flex-end'}}>
           {props.parsing && <span className="badge">Parsing… <progress max={props.parsing.total} value={props.parsing.done}></progress></span>}
         </div>
       </div>
@@ -889,11 +1549,28 @@ function TopRibbon(props:{
 /* ========================= Main App ========================= */
 
 export default function App(){
+  const [focusLine, setFocusLine] = React.useState<string | null>(null);
   // raw/unfiltered results from worker
 const [timelineStep, setTimelineStep] = useState<number>(1);
   
   const [actorsSeen, setActorsSeen] = useState<string[]>([]);
 const [baseRows, setBaseRows] = useState<PlayerRow[]>([]);
+const [baseTimeline, setBaseTimeline] = useState<Array<{t:number; dps:number; hps:number}>>([]);
+const [basePerSrc, setBasePerSrc] = useState<Record<string, number[]>>({});
+const [basePerAbility, setBasePerAbility] = useState<PerAbility>({});
+const [basePerAbilityTargets, setBasePerAbilityTargets] = useState<PerAbilityTargets>({});
+const [basePerTaken, setBasePerTaken] = useState<Record<string, number>>({});
+const [basePerTakenBy, setBasePerTakenBy] = useState<Record<string, Record<string, number>>>({});
+
+const [damageEvents, setDamageEvents] = useState<DamageEvent[]>([]);
+const [healEvents, setHealEvents] = useState<HealEvent[]>([]);
+const [utilityEvents, setUtilityEvents] = useState<UtilityEvent[]>([]);
+const [deathEvents, setDeathEvents] = useState<Array<{t:number; name:string}>>([]);
+const [duration, setDuration] = useState<number>(0);
+const [debug, setDebug] = useState<any>(null);
+const lastParsedTextRef = useRef<string>("");
+
+
   // Allowed player professions
   const ALLOWED_CLASSES = useMemo(() => new Set([
     'Jedi','Bounty Hunter','Commando','Officer','Spy','Medic','Smuggler','Entertainer','Trader'
@@ -906,42 +1583,95 @@ const playersWithClass = useMemo(() => {
     !!r?.name && !!r?.profession &&
     ALLOWED_CLASSES.has(String(r.profession).toLowerCase().trim())
   ));
-  // Build longest-by-first alias across these player rows
+
+  // Build longest-by-first alias across these player rows + remember profession for that key
   const longest: Record<string,string> = {};
+  const profByKey: Record<string,string> = {};
   for (const r of rows) {
     const raw = String(r.name||'').trim();
     const key = raw.split(/\s+/)[0]?.toLowerCase() || '';
     if (!key) continue;
+
+    const prof = String(r.profession||'').trim();
+    if (prof && !profByKey[key]) profByKey[key] = prof;
+
     if (!longest[key] || raw.length > longest[key].length) longest[key] = raw;
   }
-  // Return unique canonical player names (keeps order of appearance)
-  const out: string[] = [];
+
+  // Return unique canonical players (keeps order of appearance)
+  const out: { name: string; profession?: string }[] = [];
   const seen = new Set<string>();
   for (const r of rows) {
     const raw = String(r.name||'').trim();
     const key = raw.split(/\s+/)[0]?.toLowerCase() || '';
     const can = longest[key] || raw;
-    if (!seen.has(can)) { seen.add(can); out.push(can); }
+    if (!seen.has(can)) {
+      seen.add(can);
+      out.push({ name: can, profession: profByKey[key] });
+    }
   }
   return out;
 }, [baseRows, ALLOWED_CLASSES]);
 
-  const [baseTimeline, setBaseTimeline] = useState<Array<{t:number; dps:number; hps:number}>>([]);
-  const [basePerSrc, setBasePerSrc] = useState<Record<string, number[]>>({});
+
+
+
+  const UTILITY_DURATIONS_SEC: Record<string, number> = useMemo(() => ({
+    "off the cuff": 20,
+    "end of the line": 30,
+  }), []);
+
+  type UtilityStat = { count: number; uptime: number; uptimePct: number };
+  const utilityByPlayer: Record<string, Record<string, UtilityStat>> = useMemo(() => {
+    const out: Record<string, Record<string, UtilityStat>> = {};
+    if (!utilityEvents || !utilityEvents.length) return out;
+
+    const by: Record<string, Record<string, number[]>> = {};
+    for (const ev of utilityEvents) {
+      const p = String(ev.src||"").trim();
+      const a = String(ev.ability||"").trim();
+      if (!p || !a) continue;
+      const an = a.toLowerCase().trim();
+      if (!by[p]) by[p] = {};
+      if (!by[p][a]) by[p][a] = [];
+      by[p][a].push(ev.t);
+    }
+
+    for (const p of Object.keys(by)) {
+      out[p] = {};
+      for (const a of Object.keys(by[p])) {
+        const times = by[p][a].slice().sort((x,y)=>x-y);
+        const dur = UTILITY_DURATIONS_SEC[a.toLowerCase().trim()] || 0;
+        let uptime = 0;
+        let curStart = -1;
+        let curEnd = -1;
+        for (const t of times) {
+          const s = t;
+          const e = Math.min(duration, t + dur);
+          if (curStart < 0) { curStart = s; curEnd = e; continue; }
+          if (s <= curEnd) {
+            // overlap / refresh
+            if (e > curEnd) curEnd = e;
+          } else {
+            uptime += Math.max(0, curEnd - curStart);
+            curStart = s; curEnd = e;
+          }
+        }
+        if (curStart >= 0) uptime += Math.max(0, curEnd - curStart);
+        const count = times.length;
+        out[p][a] = { count, uptime, uptimePct: duration ? (uptime / duration) : 0 };
+      }
+    }
+    return out;
+  }, [utilityEvents, duration, UTILITY_DURATIONS_SEC]);
+
+
+
   
   // Broad NPC alias tokens used to hide NPCs from Encounter Summary (substring, case-insensitive)
   const npcAliases = useMemo(() => [
     'sith shadow', 'element of', 'mynock', 'golem', 'kizash', 'mellichae', 'sinya nilim', 'krix', 'warlord', 'raider', 'flight', 'grenadier', 'blackguard', 'blacksun', 'honor'
   ], []);
-const [basePerAbility, setBasePerAbility] = useState<PerAbility>({});
-  const [basePerAbilityTargets, setBasePerAbilityTargets] = useState<PerAbilityTargets>({});
-  const [basePerTaken, setBasePerTaken] = useState<Record<string, number>>({});
-  const [basePerTakenBy, setBasePerTakenBy] = useState<Record<string, Record<string, number>>>({});
-  const [damageEvents, setDamageEvents] = useState<DamageEvent[]>([]);
-  const [healEvents, setHealEvents] = useState<HealEvent[]>([]);
-  const [deathEvents, setDeathEvents] = useState<Array<{t:number; name:string}>>([]);
-  const [duration, setDuration] = useState<number>(0);
-  const [debug, setDebug] = useState<any>(null);
 
   // filtered (by segment) derived state
   const [rows, setRows] = useState<PlayerRow[]>([]);
@@ -974,8 +1704,15 @@ const [collectUnparsed, setCollectUnparsed] = useState(false);
 const [parsing, setParsing] = useState<{done:number,total:number}|null>(null);
 const [compareOn, setCompareOn] = useState(true);
 
+const [pA, setPA] = useState('');
+const [pB, setPB] = useState('');
+
 const [encOpen, setEncOpen] = useState(false);
 const [encLoading, setEncLoading] = useState(false);
+
+const [psOpen, setPsOpen] = useState(false);
+const [psLoading, setPsLoading] = useState(false);
+const [psSelectedPlayers, setPsSelectedPlayers] = useState<string[]>([]);
 
 const LOADER_OPEN_DELAY_MS = 1200;
 const LOADER_MIN_MS = 2500;
@@ -994,7 +1731,18 @@ const openSummary = React.useCallback(() => {
     setEncLoading(false);                       // ✅ keep loader up long enough to see it
   }, LOADER_MIN_MS);
 }, [LOADER_OPEN_DELAY_MS, LOADER_MIN_MS]);
-const [pA, setPA] = useState(''); const [pB, setPB] = useState(''); 
+
+const openPlayerSummary = React.useCallback(() => {
+  // Initialize selection from current A/B picks (or keep existing)
+  setPsSelectedPlayers(prev => {
+    if (prev && prev.length) return prev.slice(0, 5);
+    const seed = [pA, pB].filter(Boolean).slice(0, 5);
+    return seed;
+  });
+  setPsLoading(true);
+  setTimeout(() => setPsOpen(true), LOADER_OPEN_DELAY_MS);
+  setTimeout(() => setPsLoading(false), LOADER_MIN_MS);
+}, [LOADER_OPEN_DELAY_MS, LOADER_MIN_MS, pA, pB]);
   const [mode, setMode] = useState<'sources'|'abilities'|'statistics'>('sources'); // <- extended
   const [smooth, setSmooth] = useState(true);
   const workerRef = useRef<Worker|null>(null);
@@ -1028,7 +1776,47 @@ const resetWindow = useCallback(() => {
 ]);
 // --- Zoom / window selection ---
   const [selecting, setSelecting] = useState<{x0:number, x1:number} | null>(null);
+
+  // PERF: throttle selection drag updates (mouse move) to one per animation frame
+  const selRafRef = useRef<number | null>(null);
+  const selPendingX1Ref = useRef<number | null>(null);
+  const scheduleSelectingX1 = useCallback((x1: number) => {
+    selPendingX1Ref.current = x1;
+    if (selRafRef.current != null) return;
+    selRafRef.current = requestAnimationFrame(() => {
+      selRafRef.current = null;
+      const nextX1 = selPendingX1Ref.current;
+      if (nextX1 == null) return;
+      setSelecting(s => (s ? ({ ...s, x1: nextX1 }) : s));
+    });
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (selRafRef.current != null) cancelAnimationFrame(selRafRef.current);
+      selRafRef.current = null;
+    };
+  }, []);
+
   const [hoverX, setHoverX] = useState<number | null>(null);
+
+  // PERF: throttle high-frequency hover updates to one per animation frame
+  const hoverRafRef = useRef<number | null>(null);
+  const hoverPendingRef = useRef<number | null>(null);
+  const scheduleHoverX = useCallback((next: number | null) => {
+    hoverPendingRef.current = next;
+    if (hoverRafRef.current != null) return;
+    hoverRafRef.current = requestAnimationFrame(() => {
+      hoverRafRef.current = null;
+      setHoverX(hoverPendingRef.current);
+    });
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (hoverRafRef.current != null) cancelAnimationFrame(hoverRafRef.current);
+      hoverRafRef.current = null;
+    };
+  }, []);
+
 
 const clampToActive = useCallback((start:number, end:number)=>{
     if (segIndex >= 0 && segments[segIndex]) {
@@ -1051,6 +1839,32 @@ const clampToActive = useCallback((start:number, end:number)=>{
 
   // ability expand
   const [openAbility, setOpenAbility] = useState<string>('');
+
+  // Abilities table scroll perf (virtualized rows)
+  const abilitiesScrollRef = useRef<HTMLDivElement | null>(null);
+  const [abilitiesScrollTop, setAbilitiesScrollTop] = useState(0);
+  const [abilitiesViewportH, setAbilitiesViewportH] = useState(640);
+  const abilitiesScrollRaf = useRef<number | null>(null);
+
+  const onAbilitiesScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    if (abilitiesScrollRaf.current != null) cancelAnimationFrame(abilitiesScrollRaf.current);
+    abilitiesScrollRaf.current = requestAnimationFrame(() => {
+      setAbilitiesScrollTop(el.scrollTop);
+    });
+  }, []);
+
+  useEffect(() => {
+    const el = abilitiesScrollRef.current;
+    if (!el || typeof (window as any).ResizeObserver === "undefined") return;
+
+    const ro = new (window as any).ResizeObserver(() => {
+      setAbilitiesViewportH(el.clientHeight || 640);
+    });
+    ro.observe(el);
+    setAbilitiesViewportH(el.clientHeight || 640);
+    return () => ro.disconnect();
+  }, []);
 
 
   /* -------------------- worker / parsing -------------------- */
@@ -1095,7 +1909,7 @@ w.onmessage = (ev:any)=>{
         const {
           rows:rws, tl, perSrc, perAbility, perAbilityTargets:pat,
           perTaken, perTakenBy, debug, duration,
-          damageEvents, healEvents, deathEvents
+          damageEvents, healEvents, utilityEvents, deathEvents
         , actors: actorsFromWorker} = msg.payload;
 
         const { pa: basePaNorm, pat: basePatNorm } =
@@ -1109,6 +1923,11 @@ w.onmessage = (ev:any)=>{
         setBasePerTakenBy(perTakenBy||{});
         setDamageEvents(damageEvents||[]);
         setHealEvents(healEvents||[]);
+        const utilFromWorker = utilityEvents || [];
+        const utilFallback = (!utilFromWorker.length && lastParsedTextRef.current)
+          ? extractUtilityEventsFromPerforms(lastParsedTextRef.current)
+          : utilFromWorker;
+        setUtilityEvents(utilFallback);
         setDeathEvents(deathEvents||[]);
         setDuration(duration||0);
         setDebug(debug);
@@ -1146,6 +1965,7 @@ w.onmessage = (ev:any)=>{
   async function parseTextViaWorker(text:string){
     const w = await ensureWorker();
     setParsing({done:0,total:1});
+    lastParsedTextRef.current = text;
     try {
       // Send both legacy and typed shapes so either worker impl will parse it
       w.postMessage({ text, collectUnparsed });
@@ -1418,6 +2238,22 @@ const listDamage = useMemo(()=> barData(rows, metric), [rows, metric]);
   const listHealing = useMemo(()=> barData(rows, 'healingDone'), [rows]);
   const inferredClasses = useMemo(()=> inferClasses(rows, perAbility), [rows, perAbility]);
 
+// PlayerSummary expects Player objects (name + optional profession). Build it from parsed events, then attach inferred class.
+const playersForSummary = useMemo(() => {
+  const set = new Set<string>();
+  for (const e of damageEvents) if (e?.src) set.add(e.src);
+  for (const e of healEvents) if (e?.src) set.add(e.src);
+  for (const e of utilityEvents) if (e?.src) set.add(e.src);
+  for (const d of deathEvents) if (d?.name) set.add(d.name);
+
+  return Array.from(set)
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
+    .map(name => ({ name, profession: inferredClasses?.[name] }));
+}, [damageEvents, healEvents, utilityEvents, deathEvents, inferredClasses]);
+
+
+
   const playersWithInferredClass = useMemo(() => (
     (rows || [])
       .filter(r => !!r?.name && !!inferredClasses[r.name])
@@ -1469,6 +2305,9 @@ const listDamage = useMemo(()=> barData(rows, metric), [rows, metric]);
     })),
     [top10Names, smooth, perSrc, timeline, inferredClasses]
   );
+
+  // Labels on the timeline can get crowded—only tag a few of the most relevant lines.
+  const topLabelNames = useMemo(() => top10Names.slice(0, 4), [top10Names]);
 const deathFlags = useMemo(() => {
   if (!deathEvents?.length || !top10Series?.length) return [];
   const allow = new Set(top10Series.map(s => s.name));
@@ -1524,6 +2363,7 @@ const deathFlags = useMemo(() => {
       <style dangerouslySetInnerHTML={{ __html: RIBBON_CSS }} />
       <style dangerouslySetInnerHTML={{ __html: RIBBON_EXTRA }} />
       <style dangerouslySetInnerHTML={{ __html: ENC_CSS }} />
+      <style dangerouslySetInnerHTML={{ __html: PS_CSS }} />
       <div style={{ minHeight:'100vh', padding:16 }}>
       
 <div className="card" style={{ padding:12, marginBottom:12 }}>
@@ -1546,6 +2386,7 @@ const deathFlags = useMemo(() => {
   parsing={parsing}
   timelineStep={timelineStep} setTimelineStep={setTimelineStep}
   onOpenSummary={openSummary}
+  onOpenPlayerSummary={openPlayerSummary}
 />
 
 </div>
@@ -1562,12 +2403,36 @@ const deathFlags = useMemo(() => {
   classOf={inferredClasses}
   allowedClasses={Array.from(ALLOWED_CLASSES)}
   />
-<StarLoader show={encLoading} />
+
+<PlayerSummary
+  open={psOpen}
+  onClose={() => setPsOpen(false)}
+  players={playersForSummary}
+  selectedPlayers={psSelectedPlayers}
+  onChangeSelectedPlayers={setPsSelectedPlayers}
+  classOf={inferredClasses}
+  duration={duration}
+  damageEvents={damageEvents}
+  healEvents={healEvents}
+  utilityEvents={utilityEvents}
+  deathEvents={deathEvents}
+  perAbility={perAbility}
+  utilityByPlayer={utilityByPlayer}
+/>
+<StarLoader show={encLoading || psLoading} subtitle={encLoading ? "Preparing encounter summary" : "Preparing player summary"} />
 
 
       {/* Timeline + segments UI */}
-      <div className="card">
-        <div style={{ padding:'12px 14px', borderBottom:'1px solid #1b2738', display:'flex', flexDirection:'column', alignItems:'center', gap:10 }}>
+      <div className="card holoTimelineWrap" tabIndex={0}>
+
+<div className="holoTimelineNoise" aria-hidden="true" />
+<div className="holoTimelineScan" aria-hidden="true" />
+<div className="holoCorner tl" aria-hidden="true" />
+<div className="holoCorner tr" aria-hidden="true" />
+<div className="holoCorner bl" aria-hidden="true" />
+<div className="holoCorner br" aria-hidden="true" />
+
+        <div className="abilitiesHeader" style={{ padding:'12px 14px', borderBottom:'1px solid #1b2738', display:'flex', flexDirection:'column', alignItems:'center', gap:10 }}>
           <div style={{ alignSelf:'flex-start' }}><div style={{ fontSize:13, fontWeight:800, color:'#9fb7d8', letterSpacing:.3 }}>DPS Over Time - Top 10</div></div>
           <div className="row" style={{gap:8, alignItems:'center', justifyContent:'center', flexWrap:'wrap', width:'100%', marginTop:6}}>
             <label className="row" style={{gap:6}}><input type="checkbox" checked={smooth} onChange={e=>setSmooth(e.target.checked)} /><span className="pill">Smooth</span></label>
@@ -1594,7 +2459,7 @@ const deathFlags = useMemo(() => {
 
         <div style={{ padding:0, height:420, width:'100%' }}>
           <ResponsiveContainer width="100%" height="100%" debounce={200}>
-            <LineChart onMouseDown={(e:any)=>{ if(!e||e.activeLabel==null)return; setSelecting({x0:Number(e.activeLabel),x1:Number(e.activeLabel)}); }} onMouseMove={(e:any)=>{ if(e&&e.activeLabel!=null) setHoverX(Number(e.activeLabel)); if(!selecting||!e||e.activeLabel==null) return; setSelecting(s=>s?({...s,x1:Number(e.activeLabel)}):s); }} onMouseUp={(e:any)=>{ if(!selecting) return; const {x0,x1}=selecting; setSelecting(null); if(Math.abs(x1-x0)>=1) commitWindow(x0,x1); }} onMouseLeave={()=> setHoverX(null)} onDoubleClick={()=> resetWindow()} data={top10Data} margin={{ top: 8, right: 20, left: 0, bottom: 0 }}>
+            <LineChart onMouseLeave={() => { setFocusLine(null); scheduleHoverX(null); }} onMouseDown={(e:any)=>{ if(!e||e.activeLabel==null)return; setSelecting({x0:Number(e.activeLabel),x1:Number(e.activeLabel)}); }} onMouseMove={(e:any)=>{ if(e&&e.activeLabel!=null) scheduleHoverX(Number(e.activeLabel)); if(!selecting||!e||e.activeLabel==null) return; scheduleSelectingX1(Number(e.activeLabel)); }} onMouseUp={(e:any)=>{ if(!selecting) return; const {x0,x1}=selecting; setSelecting(null); if(Math.abs(x1-x0)>=1) commitWindow(x0,x1); }} onDoubleClick={()=> resetWindow()} data={top10Data} margin={{ top: 8, right: 20, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="#1c2a3f" strokeDasharray="2 4" />
               <XAxis
                 dataKey="t"
@@ -1608,13 +2473,17 @@ const deathFlags = useMemo(() => {
                 stroke="#8aa8cf"
                 domain={[0, maxY * 1.05]}
               />
-              <Tooltip formatter={(v:number)=>fmt0(v)} labelFormatter={(l)=>toMMSS(Number(l))} />
-              <Legend />
-
+              <Tooltip content={(p: any) => <HolonetTimelineTooltip {...p} onFocus={setFocusLine} />} isAnimationActive={false} allowEscapeViewBox={{ x: true, y: true }} cursor={{ stroke: "rgba(170,220,255,0.55)", strokeDasharray: "3 4" }} />
+    
               {/* Top-10 per-player lines */}
               {top10Series.map(({ name, color }) => {
                 const selected = (name === pA || name === pB);
-                const opacity = hasSelection ? (selected ? 1 : 0.4) : 1;
+                const baseOpacity = hasSelection ? (selected ? 1 : 0.4) : 1;
+
+                // Focus-line mode (FFLogs-style): when focusLine is set, fade all other lines
+                const focusMatch = (!focusLine || focusLine === name);
+                const opacity = baseOpacity * (focusMatch ? 1 : 0.12);
+                const width = focusMatch ? (selected ? 3 : 2.6) : 1.2;
 
 
 
@@ -1625,12 +2494,15 @@ const deathFlags = useMemo(() => {
                     dataKey={name}
                     name={name}
                     stroke={color}
-                    strokeWidth={2}
+                    strokeWidth={width}
                     strokeOpacity={opacity}  // dim non-selected
                     dot={false}
+                    activeDot={{ r: 3 }}
                     isAnimationActive={false}
                   >
                     {/* label at the last point only */}
+                    {topLabelNames.includes(name) && (
+
                     <LabelList
                       dataKey={name}
                       content={(props:any) => {
@@ -1650,6 +2522,8 @@ const deathFlags = useMemo(() => {
                         );
                       }}
                     />
+                    )}
+
                   </Line>
                 );
               })}
@@ -1703,21 +2577,21 @@ const deathFlags = useMemo(() => {
 
       {mode==='sources' ? (
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, marginTop:16 }}>
-          {renderPanel('Damage Done By Source', listDamage, rows, 'damageDealt', compareOn, pA, pB, pickFromChart, inferredClasses)}
-          {renderPanel('Healing Done By Source', listHealing, rows, 'healingDone', compareOn, pA, pB, pickFromChart, inferredClasses)}
-          {renderPanel(`Damage Taken By Source${(compareOn && (pA||pB)) ? ' — ' + (pA||pB) : ''}`, takenFor, rows, 'damageDealt', false, '', '', ()=>{}, inferredClasses)}
-          {renderPanel('Actions per Minute (APM)', listAPM, rows, 'damageDealt', false, '', '', ()=>{}, inferredClasses)}
+          {renderPanel('Damage Done By Source', listDamage, rows, 'Damage Dealt', mode, { label: 'Total Combat Damage Output (points)', tooltip: 'Sum of damage inflicted while in combat. Use this to compare raw output by source across the encounter. Totals reflect combat activity (not downtime) when the log provides it.' }, inferredClasses, pickFromChart)}
+          {renderPanel('Healing Done By Source', listHealing, rows, 'Healing Done', mode, { label: 'Total Healing Delivered (points)', tooltip: 'Total healing events attributed to the source. Includes effective healing captured in the log (and any overheal if present). Useful for identifying primary sustain and burst recovery.' }, inferredClasses, pickFromChart)}
+          {renderPanel(`Damage Taken By Source${(compareOn && (pA||pB)) ? ' — ' + (pA||pB) : ''}`, takenFor, rows, 'Damage Taken', mode, { label: 'Incoming Damage Sustained (points)', tooltip: 'Total hostile damage received. High values often indicate frontline duty, focus fire, or tanking responsibility — not necessarily poor play. Compare alongside deaths and heals received.' }, inferredClasses)}
+          {renderPanel('Actions per Minute (APM)', listAPM, rows, 'APM', mode, { label: 'Actions per Minute (actions/min)', tooltip: 'How frequently abilities/actions were performed during combat. Higher APM generally means higher activity/uptime, but role matters (supports/controllers spike during key windows).' }, inferredClasses)}
         </div>
       ) : mode==='abilities' ? (
-        <div className="card" style={{ marginTop:16 }}>
-          <div style={{ padding:'12px 14px', borderBottom:'1px solid #1b2738', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+        <div className="card abilitiesCard" style={{ marginTop:16 }}>
+          <div className="abilitiesHeader" style={{ padding:'12px 14px', borderBottom:'1px solid #1b2738', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
             <div style={{ fontSize:13, fontWeight:800, color:'#9fb7d8', letterSpacing:.3 }}>Abilities — {(pA || names[0] || 'No player selected')}</div>
             <div className="row">
               <span className="pill">Click a bar to pick A (Shift+Click for B). Abilities show A (or top player).</span>
             </div>
           </div>
-          <div style={{ padding:14, overflow:'auto' }}>
-            <table className="table">
+          <div ref={abilitiesScrollRef} onScroll={onAbilitiesScroll} className="abilitiesScroll" style={{ padding:14, overflow:'auto' }}>
+            <table className="table abilitiesTable">
               <thead>
                 <tr>
                   <th>Ability</th>
@@ -1753,17 +2627,38 @@ const deathFlags = useMemo(() => {
     const entries = Object.entries(map);
     const total = entries.reduce((sum, [,v]) => sum + (v?.dmg || 0), 0);
 
-    return entries
+    return (() => {
+      const __sorted = (entries
       .map(([ability, v])=> ({
         ability,
         hits: v.hits,
         damage: v.dmg,
         avg: v.hits ? v.dmg / v.hits : 0,
         max: v.max
-      }))
-      .sort((a,b)=> b.damage - a.damage)
-      .flatMap(r => {
+      })))
+        .sort((a,b)=> b.damage - a.damage);
+
+      const __rowH = 54;
+      const __vh = abilitiesViewportH || 640;
+      const __total = __sorted.length;
+      const __start = Math.max(0, Math.floor(abilitiesScrollTop / __rowH) - 6);
+      const __end = Math.min(__total, __start + Math.ceil(__vh / __rowH) + 12);
+      const __top = __start * __rowH;
+      const __bot = (__total - __end) * __rowH;
+
+      const __slice = __sorted.slice(__start, __end);
+
+      return ([
+        __top ? (
+          <tr style={{ height: __top }}>
+            <td colSpan={8} style={{ padding: 0, border: 0 }} />
+          </tr>
+        ) : null,
+
+        ...__slice.flatMap((r) => {
+
         const isOpen = openAbility === r.ability;
+        const sharePct = total ? (r.damage / total) * 100 : 0;
         const targetsMap = ((perAbilityTargets[player] || {})[r.ability]) || {};
         const targets = Object.entries(targetsMap).map(([t, sv])=> ({
           target: t,
@@ -1778,15 +2673,30 @@ const deathFlags = useMemo(() => {
         return [
           (
             <tr key={r.ability}>
-              <td className="muted">
-                <button
-                  className="btn"
-                  style={{padding:'2px 8px'}}
-                  onClick={()=> setOpenAbility(isOpen ? '' : r.ability)}
-                >
-                  {isOpen ? '▾' : '▸'}
-                </button>{' '}
-                {r.ability + (isDoT ? ' (Damage over Time)' : '')}
+              <td className="abilityCell">
+                <div className="abilityMain" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <button
+                    className="btn abilityToggle"
+                    onClick={()=> setOpenAbility(isOpen ? '' : r.ability)}
+                    aria-label={isOpen ? "Collapse ability" : "Expand ability"}
+                    title={isOpen ? "Collapse" : "Expand"}
+                  >
+                    {isOpen ? '▾' : '▸'}
+                  </button>
+
+                  <div className="abilityText" style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                    <div className="abilityTopRow">
+                      <div className="abilityName">
+                        {r.ability}
+                        {isDoT ? <span className="abilityTag">DoT</span> : null}
+                      </div>
+                    </div>
+
+                    <div className="abilityBar" title={`${Math.min(100, Math.max(0, sharePct)).toFixed(1)}% of player damage`}>
+                      <div className="abilityBarFill" style={{ width: `${Math.min(100, Math.max(0, sharePct))}%` }} />
+                    </div>
+                  </div>
+                </div>
               </td>
               <td className="num">{fmt0(r.hits)}</td>
               <td className="num">{fmt0(r.damage)}</td>
@@ -1870,8 +2780,15 @@ const deathFlags = useMemo(() => {
             </tr>
           ) : null
         ].filter(Boolean) as any;
-      });
-  })()}
+        }),
+
+        __bot ? (
+          <tr style={{ height: __bot }}>
+            <td colSpan={8} style={{ padding: 0, border: 0 }} />
+          </tr>
+        ) : null,
+      ].filter(Boolean) as any);
+    })();})()}
 </tbody>
 
                          </table>
@@ -1894,43 +2811,175 @@ const deathFlags = useMemo(() => {
   </div>
     </div>
 
-      <StarLoader show={encLoading} />
+      <StarLoader show={encLoading || psLoading} subtitle={encLoading ? "Preparing encounter summary" : "Preparing player summary"} />
 </ErrorBoundary>;
 }
 
 /* ========================= Shared panel renderer ========================= */
 
+type AxisFooterSpec = { label: string; tooltip: string };
+
+
+function HolonetTimelineTooltip({
+  active,
+  label,
+  payload,
+  onFocus,
+}: {
+  active?: boolean;
+  label?: any;
+  payload?: any[];
+  onFocus?: (name: string | null) => void;
+}) {
+  if (!active || label == null || !payload || payload.length === 0) return null;
+
+  const items = (payload || [])
+    .filter((p: any) => typeof p?.value === "number" && p.value > 0)
+    .sort((a: any, b: any) => (b.value as number) - (a.value as number))
+    .slice(0, 6);
+
+  return (
+    <div
+      onMouseLeave={() => onFocus?.(null)}
+      style={{
+        pointerEvents: "auto",
+        padding: "10px 12px",
+        borderRadius: 12,
+        background:
+          "linear-gradient(180deg, rgba(10, 26, 46, 0.96), rgba(7, 16, 30, 0.92))",
+        border: "1px solid rgba(120, 220, 255, 0.28)",
+        boxShadow: "0 18px 40px rgba(0,0,0,0.45), 0 0 16px rgba(70, 190, 255, 0.10)",
+        color: "rgba(220,245,255,0.96)",
+        minWidth: 220,
+      }}
+    >
+      <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+        {toMMSS(Number(label))}
+      </div>
+      <div style={{ height: 6 }} />
+      {items.length === 0 ? (
+        <div style={{ fontSize: 12, opacity: 0.85 }}>No activity</div>
+      ) : (
+        <div style={{ display: "grid", gap: 6 }}>
+          {items.map((it: any) => (
+            <div key={String(it.dataKey)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                <span
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: 999,
+                    background: it.stroke || "rgba(120,220,255,0.9)",
+                    boxShadow: "0 0 10px rgba(70, 200, 255, 0.18)",
+                    flex: "0 0 auto",
+                  }}
+                />
+                <span style={{ fontSize: 12, opacity: 0.92, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {it.name || it.dataKey}
+                </span>
+              </div>
+              <span style={{ fontSize: 12, fontWeight: 800 }}>{fmt0(it.value)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ marginTop: 8, fontSize: 11, opacity: 0.65 }}>
+        Showing top {items.length} at this moment
+      </div>
+    </div>
+  );
+}
+
+function HolonetAxisFooter({ spec, tabKey }: { spec: AxisFooterSpec; tabKey: string }) {
+  const [open, setOpen] = React.useState(false);
+  const [hovered, setHovered] = React.useState(false);
+  return (
+    <div className="holoAxisFooterWrap" onMouseLeave={() => setOpen(false)} style={{ position: "relative" }}>
+      <div className="holoAxisFooterScan" aria-hidden="true" />
+      <div className="holoAxisFooterRow">
+        <div
+          key={tabKey + "|" + spec.label}
+          className="holoAxisFooterLabel"
+          style={{ animation: "pillPop 520ms cubic-bezier(.2,.9,.2,1) both" }}
+        >
+          <span className="holoDot" aria-hidden="true" style={{ width: 7, height: 7 }} />
+          <span>{spec.label}</span>
+        </div>
+
+        <div
+          className="holoAxisFooterChip"
+          onMouseEnter={() => setOpen(true)}
+          onFocus={() => setOpen(true)}
+          tabIndex={0}
+          aria-label="Metric info"
+        >
+          i
+        </div>
+
+        {open && (
+          <div className="holoAxisFooterTip" role="tooltip">
+            <div className="holoAxisFooterTipTitle">Holonet Briefing</div>
+            <div style={{ opacity: 0.92 }}>{spec.tooltip}</div>
+            <div className="holoAxisFooterTipPointer" aria-hidden="true" />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+
 function renderPanel(
-  title:string,
-  list:{name:string;value:number}[],
-  rows:PlayerRow[],
-  metric:MetricKey,
-  compareOn:boolean, pA:string, pB:string,
-  onPick:(name:string, ev?:any)=>void,
-  inferredClasses:Record<string,string> = {}
-){
-  return <div className="card">
-    <div style={{ padding:'12px 14px', borderBottom:'1px solid #1b2738', display:'flex', justifyContent:'space-between' }}>
-      <div style={{ fontSize:13, fontWeight:800, color:'#9fb7d8', letterSpacing:.3 }}>{title}</div>
+  title: string,
+  list: { name: string; value: number }[],
+  rows: PlayerRow[],
+  seriesName: string,
+  tabKey: string,
+  axisFooter?: AxisFooterSpec,
+  inferredClasses: Record<string, string> = {},
+  onPick?: (name: string, ev?: any) => void,
+) {
+  return <div className="card holo-panel">
+    <div className="abilitiesHeader" style={{ padding:'12px 14px', borderBottom:'1px solid #1b2738', display:'flex', justifyContent:'space-between' }}>
+      <div style={{ fontSize:13, fontWeight:800, color:'#9fb7d8', letterSpacing:.3, display:'flex', alignItems:'center', gap:8 }}>
+        <span className="holoDot" aria-hidden="true" />
+        <span>{title}</span>
+      </div>
       <div><ClassLegend /></div>
     </div>
-    <div style={{ padding:14, height:360 }}>
-      <ResponsiveContainer debounce={200}>
-        <BarChart data={list} layout="vertical" margin={{ top:6, right:40, left:20, bottom:6 }} barCategoryGap="28%" barGap={6}>
+    <div className="holoChartFrame" style={{ padding:14, height:430, display:"flex", flexDirection:"column", gap:10 }}>
+      <div className="holo-scanlines" aria-hidden="true" />
+      <div className="holo-vignette" aria-hidden="true" />
+      <div style={{ flex: 1, minHeight: 0 }}>
+        <ResponsiveContainer width="100%" height="100%" debounce={200}>
+          <BarChart data={list} layout="vertical" margin={{ top:6, right:120, left:20, bottom:6 }} barCategoryGap="28%" barGap={6}>
+          <defs>
+            <filter id="holoGlow" x="-50%" y="-50%" width="200%" height="200%">
+              <feDropShadow dx="0" dy="0" stdDeviation="2" floodColor="#7fd0ff" floodOpacity="0.35" />
+              <feDropShadow dx="0" dy="0" stdDeviation="6" floodColor="#1b5b8e" floodOpacity="0.25" />
+            </filter>
+          </defs>
           <CartesianGrid horizontal={false} strokeDasharray="3 3" />
           <YAxis type="category" dataKey="name"
                  width={Math.max(160, Math.min(360, 16 + list.reduce((m,i)=>Math.max(m,(i.name||'').length),0)*8))}
                  interval={0} tick={{ fill: "#cfe3ff", fontSize: 12 }} tickLine={false} axisLine={false} />
           <XAxis type="number" tickFormatter={(v:number)=> fmt0(v)} tick={{ fill: "#9bb7df" }} />
-          <Tooltip formatter={(v:number)=> fmt0(v)} labelFormatter={(l)=> l as string} />
-          <Legend />
-          <Bar dataKey="value" name={metric==='damageDealt'?'Damage Dealt': metric==='avgDps'?'Average DPS':'Healing Done'}
-               radius={[4,4,4,4]} onClick={(data:any, _idx:number, ev:any)=> onPick?.(String(data?.payload?.name||''), ev)}>
-            <LabelList dataKey="value" position="right" formatter={(v:number)=> fmt0(v)} />
+          <Tooltip isAnimationActive={false} formatter={(v:number)=> fmt0(v)} labelFormatter={(l)=> l as string} />
+          <Bar
+            dataKey="value"
+            name={seriesName}
+            radius={[4,4,4,4]}
+            isAnimationActive={false}
+            onClick={(data:any, _idx:number, ev:any)=> onPick?.(String(data?.payload?.name||''), ev)}
+          >
+            <LabelList dataKey="value" content={barValuePillOutsideRight} />
             {list.map((it, i)=> <Cell key={'c'+i} fill={classColor(inferredClasses[it.name])} />)}
           </Bar>
-        </BarChart>
-      </ResponsiveContainer>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      {axisFooter ? <HolonetAxisFooter spec={axisFooter} tabKey={tabKey} /> : null}
     </div>
   </div>;
 }
@@ -1985,7 +3034,7 @@ export function DefenseFlow({
       stroke="#000"
       strokeWidth={3.6}
       paintOrder="stroke"
-      style={{ pointerEvents: "none" }}
+      style={{ pointerEvents: "auto" }}
     >
       {children}
     </text>
@@ -2137,7 +3186,7 @@ export function DefenseFlow({
           stroke="#000"
           strokeWidth={3.6}
           paintOrder="stroke"
-          style={{ pointerEvents: "none" }}
+          style={{ pointerEvents: "auto" }}
         >
           {label}
         </text>

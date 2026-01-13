@@ -1,5 +1,9 @@
 /* eslint-disable no-restricted-globals */
 
+// Shared scratch var (prevents ReferenceError if code assigns to `match`)
+let match: RegExpExecArray | null = null;
+
+
 // ---------- Types ----------
 type ElementalBreakdown = Record<string, number>;
 
@@ -17,6 +21,9 @@ type DamageEvent = {
   elements?: ElementalBreakdown; // <- NEW
 };
 type HealEvent = { t: number; src: string; dst: string; ability: string; amount: number };
+
+type UtilityEvent = { t:number; src:string; ability:string };
+
 type PlayerRow = { name: string; profession?: string; damageDealt: number; healingDone: number; avgDps: number };
 
 type PerAbility = Record<string, Record<string, { hits: number; dmg: number; max: number }>>;
@@ -77,6 +84,8 @@ const RX_DODGE_PARRY_4 =
 
 const RX_HEAL = /^(.+?)\s+heals\s+(.+?)\s+for\s+(\d+)\s+points(?:\s+with\s+(.+))?/i;
 const RX_DEATH = /^(.+?)\s+is\s+no\s+more\./i;
+
+const RX_PERFORM = /^(.+?)\s+performs\s+(.+?)\.?\s*$/i;
 
 // Helpers
 const RX_POINTS_BLOCKED = /\((\d+)\s+points\s+blocked\)/i;
@@ -307,7 +316,8 @@ self.onmessage = async (ev: MessageEvent<any>) => {
 
     const damageEvents: DamageEvent[] = [];
     const healEvents: HealEvent[] = [];
-    const deathEvents: Array<{ t: number; name: string }> = []; // DECLARED
+        const utilityEvents: UtilityEvent[] = [];
+const deathEvents: Array<{ t: number; name: string }> = []; // DECLARED
     const unparsed: string[] = [];
 
     const dpsByActor: Record<string, number[]> = {};
@@ -452,6 +462,15 @@ self.onmessage = async (ev: MessageEvent<any>) => {
         const name = (m[1] || "").trim();
         deathEvents.push({ t, name });
         continue;
+
+      // utility/buff line: "<name> performs <Ability>."
+      if ((m = RX_PERFORM.exec(rest))) {
+        const src = (m[1] || "").trim();
+        const ability = (m[2] || "").trim();
+        if (src && ability) utilityEvents.push({ t, src, ability });
+        continue;
+      }
+
       }
 
       const normNames = (srcRaw: string, dstRaw: string) => {
@@ -930,6 +949,7 @@ self.onmessage = async (ev: MessageEvent<any>) => {
       damageEvents,
       healEvents,
       deathEvents,
+      utilityEvents,
     };
 
     (self as any).postMessage({ type: "done", payload });

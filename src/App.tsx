@@ -1,10 +1,247 @@
-import React, { useEffect, useMemo, useRef, useState, useCallback, useTransition, useDeferredValue } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback, useTransition, useDeferredValue, useLayoutEffect } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { createPortal } from "react-dom";
 import ErrorBoundary from "./ErrorBoundary";
 import DpsPopoutButton from "./components/DpsPopoutButton";
-import { ResponsiveContainer, AreaChart, Area, LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip, Legend, BarChart, Bar, LabelList, Cell, Sankey, ReferenceLine, ReferenceArea } from "recharts";
+import { ResponsiveContainer, AreaChart, Area, LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip, Legend, BarChart, Bar, LabelList, Cell, Sankey, Scatter, ReferenceLine, ReferenceArea, ComposedChart, Brush, Customized } from "recharts";
 import EncounterSummary from "./components/EncounterSummary";
 import PlayerSummary from "./components/PlayerSummary";
 import StarLoader from './StarLoader';
+
+type HoverPopupProps = {
+  i: number;
+  secondsTotal: number;
+  hb: Record<string, number>;
+  db: Record<string, number>;
+  fmt0: (n: number) => string;
+};
+
+
+type SmartTooltipBoxProps = {
+  depKey: string;
+  children: React.ReactNode;
+  offset?: number;
+  cardId?: string;
+};
+
+
+// Heuristic: player names in SWG are typically single tokens (may include apostrophes).
+// NPCs/bosses commonly contain spaces (e.g., "An old man", "Imperial Officer") or obvious NPC keywords.
+// We use this only to decide whether we should wait for/assign class-based colors in exports.
+const isLikelyNpcName = (rawName: string): boolean => {
+  const name = (rawName || "").trim();
+  if (!name) return true;
+
+  // Multi-word names are almost always NPCs/bosses in these logs.
+  if (name.includes(" ")) return true;
+
+  // Common non-player buckets / placeholders
+  if (/^(unknown|environment|raid|group|all)$/i.test(name)) return true;
+
+  // A few obvious NPC-like patterns (kept broad but low-risk)
+  if (/(droid|probe|trooper|officer|commander|captain|lieutenant|sergeant|general|lord|master|jedi|sith|beast|creature|pet)/i.test(name)) {
+    return true;
+  }
+
+  return false;
+};
+
+/**
+ * Recharts tooltips are positioned at the cursor. If the tooltip would overflow the viewport,
+ * this wrapper flips it up/left so the full panel stays visible without requiring scroll.
+ */
+function SmartTooltipBox({ depKey, children, cardId }: SmartTooltipBoxProps) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState<{ left: number; top: number }>({ left: 0, top: 0 });
+
+  /**
+   * Center the holo tooltip within the chart card (not at the cursor).
+   * This avoids "random" flipping behavior and prevents clipping near edges.
+   */
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    const raf = requestAnimationFrame(() => {
+      const tip = el.getBoundingClientRect();
+
+      // Find the correct card wrapper (we portal tooltips to <body>, so use an explicit selector)
+      const card = cardId
+        ? (document.querySelector(`[data-holo-card-id="${CSS.escape(cardId)}"]`) as HTMLElement | null)
+        : (document.querySelector('[data-holo-card="1"]') as HTMLElement | null);
+      const cardRect = card?.getBoundingClientRect();
+
+      const vw = window.innerWidth || 0;
+      const vh = window.innerHeight || 0;
+      const pad = 10;
+
+      // Default: center in the card; fallback: center in viewport
+      let cx = cardRect ? cardRect.left + cardRect.width / 2 : vw / 2;
+      let cy = cardRect ? cardRect.top + cardRect.height / 2 : vh / 2;
+
+      // Clamp so the tooltip stays fully visible
+      const halfW = tip.width / 2;
+      const halfH = tip.height / 2;
+
+      cx = Math.max(pad + halfW, Math.min(vw - pad - halfW, cx));
+      cy = Math.max(pad + halfH, Math.min(vh - pad - halfH, cy));
+
+      setPos({ left: Math.round(cx), top: Math.round(cy) });
+    });
+
+    return () => cancelAnimationFrame(raf);
+  }, [depKey]);
+
+  // IMPORTANT: Recharts wraps tooltips in a transformed element; "position: fixed" becomes
+  // relative to that transformed ancestor, which can make the tooltip disappear/offscreen.
+  // Portaling to <body> ensures true viewport-fixed positioning.
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div
+      ref={ref}
+      style={{
+        position: "fixed",
+        left: pos.left,
+        top: pos.top,
+        transform: "translate(-50%, -50%)",
+        willChange: "transform,left,top",
+        pointerEvents: "none",
+        zIndex: 99999,
+      }}
+    >
+      {children}
+    </div>,
+    document.body
+  );
+}
+
+function DeathSecondHoverPopup({ i, secondsTotal, hb, db, fmt0 }: HoverPopupProps) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.18, ease: 'easeOut' }}
+      style={{
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        bottom: 'calc(100% + 10px)',
+        zIndex: 50,
+        pointerEvents: 'none',
+        borderRadius: 14,
+        padding: '10px 12px',
+        background:
+          'linear-gradient(180deg, rgba(10,18,34,0.96) 0%, rgba(8,14,26,0.92) 100%)',
+        border: '1px solid rgba(150,205,255,0.18)',
+        boxShadow: '0 18px 40px rgba(0,0,0,0.55)',
+        backdropFilter: 'blur(10px)',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'baseline',
+          marginBottom: 8,
+        }}
+      >
+        <div
+          style={{
+            fontSize: 12,
+            fontWeight: 950,
+            color: '#d8ecff',
+            letterSpacing: 0.25,
+          }}
+        >
+          T-{secondsTotal - i}s details
+        </div>
+        <div style={{ fontSize: 11, color: '#7f9bc5' }}>
+          {i + 1}/{secondsTotal}
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 11, color: '#8ecbff', marginBottom: 6, fontWeight: 800 }}>
+            Heals this second
+          </div>
+          {Object.entries(hb).length ? (
+            Object.entries(hb)
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 5)
+              .map(([k, v], idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                    fontSize: 12,
+                    color: '#cfe7ff',
+                    marginBottom: 4,
+                  }}
+                >
+                  <div
+                    style={{
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {k}
+                  </div>
+                  <div style={{ fontWeight: 900, color: '#7fd0ff' }}>{fmt0(v)}</div>
+                </div>
+              ))
+          ) : (
+            <div style={{ fontSize: 12, color: '#6f86a8' }}>—</div>
+          )}
+        </div>
+
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 11, color: '#ff93ab', marginBottom: 6, fontWeight: 800 }}>
+            Damage this second
+          </div>
+          {Object.entries(db).length ? (
+            Object.entries(db)
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 5)
+              .map(([k, v], idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                    fontSize: 12,
+                    color: '#ffd6df',
+                    marginBottom: 4,
+                  }}
+                >
+                  <div
+                    style={{
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {k}
+                  </div>
+                  <div style={{ fontWeight: 900, color: '#ff9fb2' }}>{fmt0(v)}</div>
+                </div>
+              ))
+          ) : (
+            <div style={{ fontSize: 12, color: '#7a6a7b' }}>—</div>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 
 // --- Bigger, centered label for death-flag ReferenceLines ---
 type DeathLabelProps = {
@@ -15,6 +252,35 @@ type DeathLabelProps = {
   // recharts injects this when label is a React element:
   viewBox?: { x: number; y: number; width: number; height: number };
 };
+
+// Collapses whitespace and trims. Some views reference this helper when rendering
+// ability names (e.g. damage/heal feeds). Keeping it defined prevents runtime
+// ReferenceErrors if a refactor leaves a callsite behind.
+function collapseAbility(s: string) {
+  return (s || '').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeAbilityKey(ability: string) {
+  // Normalize parsed ability strings so hits/crits/glances/etc all aggregate under one base name.
+  // Handles variants like:
+  //   "Attack and hits" / "Attack and crits" / "Attack critically hits"
+  //   "Mine 2: Plasma Mine.And crits"
+  //   "Bomblet and crits (478 points blocked)"
+  let s = collapseAbility(ability);
+
+  // Drop trailing parenthetical notes like "(478 points blocked)".
+  s = s.replace(/\s*\([^)]*\)\s*$/g, '');
+
+  // Drop common outcome tails at the end.
+  // We support both "... and <outcome>" and "<ability> <outcome>" styles, plus punctuation before the tail.
+  s = s.replace(
+    /\s*[.\-:]?\s*(?:and\s+)?(?:hits?|crits?|glances?|grazes?|miss(?:es)?|blocks?|parries?|dodges?|evades?|resists?|deflects?|absorbs?|strikes\s+through|punishing\s+blows?|critical(?:ly)?\s+hits?)\b.*$/i,
+    ''
+  );
+
+  return collapseAbility(s);
+}
+
 
 const DeathLabel: React.FC<DeathLabelProps> = ({
   value, size = 16, dy = 14, anchor = 'top', viewBox
@@ -111,6 +377,65 @@ const SW_CSS = /* css */ `
   background-color: rgba(12,22,38,.98);
 }
 
+/* KPI cards (HoloNet-ish) */
+.kpi-grid{
+  position: relative;
+  z-index: 1;
+  display:grid;
+  grid-template-columns: repeat(4, minmax(0,1fr));
+  gap:16px;
+  margin-bottom:16px;
+}
+
+.death-snapshot-card{
+  position: relative;
+  z-index: 20;
+}
+
+@media (max-width: 1100px){ .kpi-grid{ grid-template-columns: repeat(2, minmax(0,1fr)); } }
+@media (max-width: 640px){ .kpi-grid{ grid-template-columns: 1fr; } }
+
+.kpi-card{
+  position: relative;
+  overflow: hidden;
+}
+.kpi-card::before{
+  content:"";
+  position:absolute; inset:0;
+  background:
+    radial-gradient(900px 140px at 50% 0%, rgba(120,200,255,.24), transparent 55%),
+    repeating-linear-gradient(90deg, rgba(255,255,255,.045) 0, rgba(255,255,255,.045) 1px, transparent 1px, transparent 14px);
+  opacity:.55;
+  pointer-events:none;
+}
+.kpi-card::after{
+  content:"";
+  position:absolute; left:0; right:0; top:0; height:3px;
+  background: linear-gradient(90deg, transparent, rgba(130,210,255,.9), transparent);
+  opacity:.75;
+  pointer-events:none;
+}
+.kpi-title{
+  font-size:11px;
+  color:#9fb8da;
+  letter-spacing:.55px;
+  font-weight:900;
+  text-transform:uppercase;
+}
+.kpi-value{
+  text-align:center;
+  font-size:28px;
+  font-weight:950;
+  margin-top:10px;
+  text-shadow: 0 0 18px rgba(120,200,255,.28);
+}
+.kpi-sub{
+  text-align:center;
+  margin-top:6px;
+  font-size:11px;
+  color:#93a8c6;
+}
+
 .swg-theme .btn{
   background: linear-gradient(180deg, rgba(40,80,130,.85), rgba(24,45,80,.85));
   color:#e9f3ff; border:1px solid rgba(120,170,255,.35); border-radius:10px; padding:6px 10px;
@@ -138,6 +463,48 @@ const SW_CSS = /* css */ `
   padding:8px 12px; border-radius:12px; letter-spacing:.08em;
 }
 .swg-theme .tab.active{ border-color:var(--accent); box-shadow: 0 0 0 1px rgba(0,0,0,.35) inset, 0 0 18px rgba(33,212,253,.25); color:#eaf6ff; }
+
+.swg-theme .exportWrap{
+  display:flex;
+  justify-content:center;
+  margin-top:12px;
+  margin-bottom:8px;
+}
+.swg-theme .exportBtn{
+  display:inline-flex;
+  align-items:center;
+  gap:10px;
+  padding:10px 16px;
+  border-radius:14px;
+  border:1px solid rgba(120,170,255,.35);
+  background: linear-gradient(180deg, rgba(33,212,253,.18), rgba(16,28,50,.92));
+  color:#d8f1ff;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  font-weight:700;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.35) inset, 0 14px 40px rgba(0,0,0,.45), 0 0 22px rgba(33,212,253,.22);
+  cursor:pointer;
+  user-select:none;
+}
+.swg-theme .exportBtn:hover{
+  border-color: rgba(33,212,253,.65);
+  box-shadow: 0 0 0 1px rgba(0,0,0,.35) inset, 0 18px 46px rgba(0,0,0,.55), 0 0 28px rgba(33,212,253,.30);
+}
+.swg-theme .exportBtn:active{
+  transform: translateY(1px);
+}
+.swg-theme .exportBtn:disabled{
+  opacity:.55;
+  cursor:default;
+  transform:none;
+}
+.swg-theme .exportSub{
+  font-size:12px;
+  color:#9bb7df;
+  margin-top:6px;
+  text-align:center;
+  letter-spacing:.02em;
+}
 
 /* ---------- TABLES (Abilities, etc.) ---------- */
 .swg-theme .table{ width:100%; border-collapse:collapse; }
@@ -179,6 +546,75 @@ const SW_CSS = /* css */ `
 .swg-theme .table td:first-child { text-align: left; }
 
 .swg-theme .table tr:hover td{ background: rgba(98,176,255,.06); }
+
+/* ---------- Damage Taken: Incoming table polish ---------- */
+.swg-theme .incomingTable {
+  border-radius: 12px;
+  overflow: hidden;
+}
+.swg-theme .incomingTable thead th{
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: linear-gradient(180deg, rgba(14,26,48,.98), rgba(10,18,34,.98));
+  border-bottom: 1px solid rgba(120,170,255,.35);
+}
+.swg-theme .incomingTable tbody tr:nth-child(odd) td{
+  background: rgba(8,14,26,.30);
+}
+.swg-theme .incomingTable tbody tr:nth-child(even) td{
+  background: rgba(12,22,38,.55);
+}
+.swg-theme .incomingTable td{
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.swg-theme .incomingTable th{
+  padding: 10px 10px;
+  font-size: 13px;
+}
+.swg-theme .incomingTable td:first-child{
+  max-width: 260px;
+}
+.swg-theme .elemPill{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width: 64px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-weight: 800;
+  letter-spacing: .02em;
+  border: 1px solid rgba(120,170,255,.28);
+  background: rgba(98,176,255,.10);
+  color: #cfe3ff;
+}
+.swg-theme .elemPill[data-elem="Energy"]{ background: rgba(255,184,77,.12); border-color: rgba(255,184,77,.28); color:#ffe2b8; }
+.swg-theme .elemPill[data-elem="Kinetic"]{ background: rgba(160,200,255,.12); border-color: rgba(160,200,255,.28); color:#d8ecff; }
+.swg-theme .elemPill[data-elem="Cold"]{ background: rgba(98,176,255,.14); border-color: rgba(98,176,255,.32); color:#cfe9ff; }
+.swg-theme .elemPill[data-elem="Heat"]{ background: rgba(255,90,111,.12); border-color: rgba(255,90,111,.30); color:#ffd1d8; }
+.swg-theme .elemPill[data-elem="Acid"]{ background: rgba(25,195,125,.12); border-color: rgba(25,195,125,.28); color:#d4ffe9; }
+.swg-theme .elemPill[data-elem="Bleeding"]{ background: rgba(255,122,206,.12); border-color: rgba(255,122,206,.30); color:#ffe0f0; }
+.swg-theme .elemPill[data-elem="Electric"]{ background: rgba(196,110,255,.12); border-color: rgba(196,110,255,.28); color:#f0ddff; }
+.swg-theme .elemPill[data-elem="Electrical"]{ background: rgba(196,110,255,.12); border-color: rgba(196,110,255,.28); color:#f0ddff; }
+
+
+
+/* Elemental split pills (KPI card) */
+.swg-theme .elemSplitPill{ padding: 8px 12px; border-radius: 999px; font-weight: 800; letter-spacing: .01em; font-size: 14px; background: transparent; }
+.swg-theme .elemSplitPillSmall{ padding: 6px 10px; border-radius: 999px; font-weight: 850; letter-spacing: .01em; font-size: 12px; background: transparent; }
+.swg-theme .elemSplitPill .elemName{ opacity:.9; }
+.swg-theme .elemSplitPill .elemPct{ font-variant-numeric: tabular-nums; }
+
+/* Add a subtle holonet glow per element */
+.swg-theme .elemPill{ box-shadow: 0 0 0 1px rgba(160,200,255,.06), 0 0 18px rgba(120,180,255,.10); }
+.swg-theme .elemPill[data-elem="Kinetic"]{ box-shadow: 0 0 0 1px rgba(124,192,255,.12), 0 0 18px rgba(124,192,255,.22); }
+.swg-theme .elemPill[data-elem="Energy"]{ box-shadow: 0 0 0 1px rgba(255,186,92,.12), 0 0 18px rgba(255,186,92,.24); }
+.swg-theme .elemPill[data-elem="Heat"]{ box-shadow: 0 0 0 1px rgba(255,108,108,.12), 0 0 18px rgba(255,108,108,.22); }
+.swg-theme .elemPill[data-elem="Cold"]{ box-shadow: 0 0 0 1px rgba(108,240,255,.12), 0 0 18px rgba(108,240,255,.22); }
+.swg-theme .elemPill[data-elem="Acid"]{ box-shadow: 0 0 0 1px rgba(118,255,194,.12), 0 0 18px rgba(118,255,194,.22); }
+.swg-theme .elemPill[data-elem="Bleeding"]{ box-shadow: 0 0 0 1px rgba(255,122,206,.12), 0 0 18px rgba(255,122,206,.22); }
+.swg-theme .elemPill[data-elem="Electric"]{ box-shadow: 0 0 0 1px rgba(196,110,255,.12), 0 0 18px rgba(196,110,255,.22); }
 
 /* Optional helper if you want to opt-in per cell: */
 .swg-theme .num { text-align:center !important; font-variant-numeric: tabular-nums; }
@@ -455,6 +891,33 @@ background:
   0%,100%{ filter: drop-shadow(0 0 6px rgba(165,220,255,.35)); }
   50%{ filter: drop-shadow(0 0 10px rgba(165,220,255,.75)); }
 }
+
+/* --- Scrollbars (Option A: styled native) --- */
+.swg-theme .scrollArea{
+  /* Firefox */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.28) rgba(255,255,255,0.06);
+}
+
+/* Chromium / Safari */
+.swg-theme .scrollArea::-webkit-scrollbar{
+  width: 10px;
+}
+.swg-theme .scrollArea::-webkit-scrollbar-track{
+  background: rgba(255,255,255,0.06);
+  border-radius: 999px;
+}
+.swg-theme .scrollArea::-webkit-scrollbar-thumb{
+  background: rgba(255,255,255,0.22);
+  border-radius: 999px;
+  border: 2px solid rgba(255,255,255,0.06);
+}
+.swg-theme .scrollArea::-webkit-scrollbar-thumb:hover{
+  background: rgba(255,255,255,0.32);
+}
+.swg-theme .scrollArea::-webkit-scrollbar-corner{
+  background: transparent;
+}
 `;
 
 
@@ -554,6 +1017,12 @@ const RIBBON_EXTRA = /* css */ `
   box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
 }
 .ab-box select{height:44px; width:240px; min-width:240px; max-width:240px; font-size:16px; border-radius:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+
+/* Holonet-style dropdown (Death selector) */
+.holoDeathSelect{height:44px;width:260px;min-width:260px;max-width:260px;padding:10px 12px;border-radius:12px;color:#e7f3ff;background:rgba(8,18,34,0.92);border:1px solid rgba(120,200,255,0.25);box-shadow:0 10px 35px rgba(0,0,0,0.35),0 0 0 1px rgba(0,255,255,0.08) inset,0 0 18px rgba(80,200,255,0.18);appearance:none;-webkit-appearance:none;-moz-appearance:none;}
+.holoDeathSelect:focus{outline:none;box-shadow:0 0 0 2px rgba(120,220,255,0.22),0 0 24px rgba(120,220,255,0.22),0 10px 35px rgba(0,0,0,0.35);}
+.holoDeathSelect option{background:#071427;color:#e7f3ff;}
+
 .ab-row{display:flex; gap:12px; align-items:center; justify-content:center; flex-wrap:nowrap;}
 .ab-actions{display:flex; gap:12px; align-items:center; justify-content:flex-end;}
 .ab-actions .btn{height:44px;}
@@ -731,6 +1200,23 @@ type DamageEventWithElements = DamageEvent & { elements?: ElementalBreakdown };
 
 const titleCase = (s: string) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s);
 const fmtPctElem = (v: number) => (v * 100 >= 99.5 || v === 0 ? (v * 100).toFixed(0) : (v * 100).toFixed(1)) + "%";
+// Generic percent formatter for ratios in [0..1]. Safe for undefined/NaN.
+const fmtPct = (v: number) => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  const p = n * 100;
+  // Use 1 decimal for small percentages; 0 decimals otherwise.
+  const dp = p > 0 && p < 10 ? 1 : 0;
+  return p.toFixed(dp) + "%";
+};
+
+const fmtInt = (v: number) => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "0";
+  return Math.round(n).toLocaleString();
+};
+
+
 
 function collectAbilityElements(
   events: DamageEventWithElements[],
@@ -1126,6 +1612,22 @@ const norm = (s?: string) => (s ?? "").normalize("NFKC").trim().toLowerCase();
 const cleanName = (s?: string) =>
   norm(s).replace(/^(a|b)\s*:\s*/, "").replace(/^player\s*(a|b)\s*:\s*/, "");
 
+// Some logs sometimes emit names with apostrophes at the end of a token,
+// e.g. "Minerva'", "Irozu'", or even "Minerva' Testing".
+// Treat these as the same entity everywhere (dropdowns + aggregation keys).
+// IMPORTANT: only strip apostrophes that appear immediately before whitespace or end-of-string.
+const stripTrailingApostrophe = (s?: string) =>
+  String(s || '')
+    .normalize('NFKC')
+    .trim()
+    // remove straight/curly apostrophes that terminate a word/token
+    .replace(/[’'](?=\s|$)/g, '')
+    .trim();
+
+// Canonicalize actor names for grouping/lookup.
+// Keep casing (so UI remains familiar) while fixing split-identity issues like "Minerva'".
+const canonActor = (n?: string) => stripTrailingApostrophe(String(n ?? '')).trim();
+
 const flagOf = (e: DFEvent) => (e.flags ?? "").toString().toLowerCase();
 const PERIODIC_TOKENS = ['periodic','dot','damage over time','bleed','burn','poison'];
 const isPeriodic = (e: DFEvent) => {
@@ -1201,7 +1703,36 @@ const CLASS_COLORS: Record<string,string> = {
   Jedi:'#00B3FF','Bounty Hunter':'#C41E3A', Commando:'#C69B6D', Officer:'#ABD473',
   Spy:'#FFF569', Medic:'#8787ED', Smuggler:'#F48CBA', Entertainer:'#FF8800', Trader:'#8F8F8F'
 };
-const classColor = (p?:string)=> CLASS_COLORS[p||''] || '#6ec7ff';
+const canonicalClassLabel = (p?: string) => {
+  const raw = (p || '').trim();
+  if (!raw) return '';
+  const k = raw.toLowerCase();
+  // Accept already-pretty labels ("Bounty Hunter") and also lower/short forms ("bounty hunter", "bh", etc.)
+  const map: Record<string, string> = {
+    'jedi': 'Jedi',
+    'bh': 'Bounty Hunter',
+    'bountyhunter': 'Bounty Hunter',
+    'bounty hunter': 'Bounty Hunter',
+    'commando': 'Commando',
+    'cmd': 'Commando',
+    'officer': 'Officer',
+    'off': 'Officer',
+    'spy': 'Spy',
+    'medic': 'Medic',
+    'doc': 'Medic',
+    'smuggler': 'Smuggler',
+    'smug': 'Smuggler',
+    'entertainer': 'Entertainer',
+    'ent': 'Entertainer',
+    'trader': 'Trader',
+    'trade': 'Trader',
+    'artisan': 'Trader'
+  };
+  // If it already matches a key in CLASS_COLORS, use it.
+  if ((CLASS_COLORS as any)[raw]) return raw;
+  return map[k] || raw;
+};
+const classColor = (p?: string) => (CLASS_COLORS as any)[canonicalClassLabel(p)] || '#6ec7ff';
 const LEGENDS_CLASSES = ['Jedi','Bounty Hunter','Commando','Officer','Spy','Medic','Smuggler','Entertainer','Trader'];
 
 /* ----- Ability collapsing & class inference ----- */
@@ -1220,7 +1751,7 @@ const ABILITY_CLASS_MAP: Record<string,string> = {
   // Spy
   'razor slash':'Spy','blaster burst':'Spy',"assassin's mark":'Spy','assassinate':'Spy',"spy's fang":'Spy',
   // Medic
-  'bacta burst':'Medic','bacta spray mark 6':'Medic','bacta ampule mark 6':'Medic','vital strike':'Medic','nerve gas':'Medic','serotonin purge':'Medic', 'rheumatic calamity':'Medic', 'bacta ampule':'Medic', 'bacta ampule (mark 6)':'Medic', 'bacta ampule "mark 6"':'Medic',
+  'bacta burst':'Medic','bacta spray':'Medic','bacta ampule':'Medic','vital strike':'Medic','nerve gas':'Medic',
 };
 
 // aggressive normalizer to merge variants like “… and hits / glances / crits / punishing blows”, ranks and fluff
@@ -1234,12 +1765,18 @@ function normalizeAbilityName(raw?: string): string {
   // strip “mine 2:” or “mine:” prefixes
   s = s.replace(/\bmine\s*\d*\s*:\s*/g, '');
 
-  // remove "and <suffix>" bits: hits/glances/crits/strikes through/<n> points blocked/punishing blows
+  // remove "and <suffix>" bits: hits/glances/crits/critically hits/strikes through/<n> points blocked/punishing blows
   s = s.replace(
-    /(?:[\s.\-]+and\s+(?:\d+\s+points\s+blocked|strikes\s+through|hits|glances|crits|punishing\s+blows)(?:\s+\(\d+%.*?\))?)/gi,
+    /(?:[\s.\-]+and\s+(?:\d+\s+points\s+blocked|strikes\s+through|hits|glances|crits|critical(?:ly)?\s+hits?|punishing\s+blows)(?:\s+\(\d+%.*?\))?)/gi,
     ''
   );
   s = s.replace(/\band\s+punishing\s+blows\b/gi, ''); // extra safety
+
+  // Some logs omit "and" and just end with "critically hits"/"critical hits"/etc.
+  s = s.replace(
+    /\s+(?:hits|glances|crits|critical(?:ly)?\s+hits?|strikes\s+through|punishing\s+blows)\b.*$/gi,
+    ''
+  );
 
   // logs sometimes leave ".and"
   s = s.replace(/\.and\b/gi, '');
@@ -1263,6 +1800,7 @@ function normalizeAbilityName(raw?: string): string {
 
   return s;
 }
+
 
 function abilityToClass(raw: string): string | undefined {
   const base = normalizeAbilityName(raw);
@@ -1314,14 +1852,40 @@ const NPC_TO_INSTANCE: Array<{ npc:string; inst:string }> = [
   { npc: 'ig-88', inst: 'IG-88' },
   { npc: 'exar kun', 'inst': 'Exar Kun' },
   { npc: 'cmdr kenkirk', inst: 'ISD' },
-  { npc: 'blacksun boarder', inst: 'ISD' },
   { npc: 'commander kenkirk', inst: 'ISD' },
   { npc: 'krix swiftshadow', inst: 'ISD' },
   { npc: 'harwakokok the mighty', inst: 'Avatar Hardmode' },
-  { npc: 'hk-47', inst: 'HK-47' },
-  { npc: 'malan', inst: 'Malan' },
-	
+
+  { npc: 'a blacksun boarder', inst: 'ISD' },
+  { npc: 'the caretaker of the lost', inst: 'Exar Kun' },
+  { npc: 'the open hand of hate', inst: 'Exar Kun' },
+  { npc: 'a tomb guardian', inst: 'Exar Kun' },
+  { npc: 'battle droid', inst: 'IG-88' },
+  { npc: 'an avatar guard', inst: 'Avatar Hardmode' },
+  { npc: 'avatar guard', inst: 'Avatar Hardmode' },
+];
 const NPC_MAP: Record<string,string> = Object.fromEntries(NPC_TO_INSTANCE.map(x=> [normName(x.npc), x.inst]));
+
+// Segment-identification NPCs (exclude from player charts/hover/top lists)
+function isSegmentNpcName(name: string): boolean {
+  return !!NPC_MAP[normName(name)];
+}
+
+
+// Optional: expand short instance labels to a friendlier dungeon/raid name.
+// If we don't have a mapping, we fall back to the segment's inferred label.
+const INSTANCE_PRETTY: Record<string, { title: string; subtitle?: string }> = {
+  'ISD': { title: 'Imperial Star Destroyer', subtitle: 'ISD' },
+  'Kizash': { title: 'Kizash' },
+  'Sinya Nilm': { title: 'Sinya Nilm' },
+  'Exar Kun': { title: 'Exar Kun' },
+  'Axkva Min': { title: 'Axkva Min' },
+  'Tusken King': { title: 'Tusken King' },
+  'IG-88': { title: 'IG-88' },
+  'Avatar Hardmode': { title: 'Avatar (Hardmode)', subtitle: 'Avatar' },
+  'Dark Side Mellichae': { title: 'Mellichae', subtitle: 'Dark Side' },
+  'Light Side Mellichae': { title: 'Mellichae', subtitle: 'Light Side' },
+};
 
 /* ----- Entity canonicalization (merge name variants in aggregation) ----- */
 const ENTITY_CANON: Record<string,string> = Object.fromEntries([
@@ -1350,6 +1914,24 @@ const ENTITY_CANON: Record<string,string> = Object.fromEntries([
 ].map(([alias, canon]) => [normName(alias), canon]));
 
 function canonEntity(name:string){ const key = normName(name); return ENTITY_CANON[key] || name; }
+
+
+// --- Player name normalization (merge apostrophe variants & Testing clones) ---
+// SWG logs sometimes emit player names like "Irozu'" or "Minerva' Testing".
+// We treat these as the same player by removing token-terminal apostrophes and
+// collapsing a trailing "Testing" suffix.
+function stripTokenTerminalApostrophes(name: string) {
+  return String(name || '').replace(/([A-Za-z0-9_])['’](?=\s|$)/g, '$1');
+}
+function normalizeActorName(name: string) {
+  let s = String(name || '').trim();
+  if (!s) return '';
+  s = stripTokenTerminalApostrophes(s);
+  s = s.replace(/\s{2,}/g, ' ').trim();
+  // Collapse "X Testing" into "X"
+  s = s.replace(/\s+Testing$/i, '').trim();
+  return s;
+}
 
 /* ========================= Helpers for charts & ability merging ========================= */
 
@@ -1389,15 +1971,66 @@ function smoothSeries(data:{t:number;v:number}[], window=5){
 }
 
 
-function actionsPerMinute(perSecond:Record<string, number[]>, timelineWindow:{t:number}[], fallbackDuration:number){
-  const winDur = timelineWindow.length ? Math.max(1, (timelineWindow[timelineWindow.length-1].t - timelineWindow[0].t + 1)) : fallbackDuration;
-  const minutes = Math.max(1, winDur/60);
-  const items = Object.entries(perSecond||{}).map(([name, series])=>{
-    const hits = (series||[]).reduce((s:number,v:number)=> s + (v>0 ? 1 : 0), 0);
+// APM should reflect *active combat time* rather than total log duration.
+// We treat "active" time as the union of derived combat segments (based on idleGap)
+// intersected with the current visible window.
+function activeSecondsFromSegments(
+  segments: { start: number; end: number }[] | undefined,
+  start: number,
+  end: number
+) {
+  if (!segments || !segments.length) return Math.max(1, end - start + 1);
+  let s = 0;
+  for (const seg of segments) {
+    const a = Math.max(start, seg.start);
+    const b = Math.min(end, seg.end);
+    if (b >= a) s += (b - a + 1);
+  }
+  return Math.max(1, s);
+}
+
+function actionsPerMinute(
+  perSecond: Record<string, number[]>,
+  timelineWindow: { t: number }[],
+  fallbackDuration: number,
+  segments?: { start: number; end: number }[]
+) {
+  const winStart = timelineWindow.length ? timelineWindow[0].t : 0;
+  const winEnd = timelineWindow.length
+    ? timelineWindow[timelineWindow.length - 1].t
+    : Math.max(0, fallbackDuration);
+
+  const maxT = Math.max(fallbackDuration, winEnd);
+  const active = new Uint8Array(maxT + 1);
+
+  if (!segments || !segments.length) {
+    for (let t = winStart; t <= winEnd && t <= maxT; t++) active[t] = 1;
+  } else {
+    for (const seg of segments) {
+      const a = Math.max(winStart, seg.start);
+      const b = Math.min(winEnd, seg.end);
+      for (let t = a; t <= b && t <= maxT; t++) active[t] = 1;
+    }
+  }
+
+  let activeSeconds = 0;
+  for (let t = winStart; t <= winEnd && t <= maxT; t++) if (active[t]) activeSeconds++;
+  activeSeconds = Math.max(1, activeSeconds);
+
+  const minutes = Math.max(1, activeSeconds / 60);
+
+  const items = Object.entries(perSecond || {}).map(([name, series]) => {
+    let hits = 0;
+    const s = series || [];
+    for (let t = winStart; t <= winEnd && t <= maxT; t++) {
+      if (!active[t]) continue;
+      if ((s[t] || 0) > 0) hits++;
+    }
     const apm = hits / minutes;
-    return { name: name || 'Unknown', value: Math.round(apm) };
+    return { name: name || "Unknown", value: Math.round(apm) };
   });
-  return items.sort((a,b)=> b.value-a.value).slice(0,12);
+
+  return items.sort((a, b) => b.value - a.value).slice(0, 12);
 }
 
 /** Merge ability rows by normalized name (also merges per-target tables). */
@@ -1549,9 +2182,438 @@ function TopRibbon(props:{
     </>
   );
 }
+
+/* ========================= Welcome Screen ========================= */
+
+type AnalyzerMode = "pve" | "pvp";
+
+function WelcomeScreen({ onSelect }: { onSelect: (mode: AnalyzerMode) => void }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [progress, setProgress] = useState(0);
+  const [ready, setReady] = useState(false);
+  const [tipIdx, setTipIdx] = useState(0);
+  const [burstKey, setBurstKey] = useState(0);
+  const [exiting, setExiting] = useState(false);
+  const [chosenMode, setChosenMode] = useState<AnalyzerMode | null>(null);
+
+  const tips = useMemo(
+    () => [
+      "Parsing tip: Larger logs take longer—keep the tab open while it indexes.",
+      "Crit % tip: Small sample sizes can swing wildly—check hit counts per ability.",
+      "Healing tip: Overheal spikes often mean late swaps or stacked healers.",
+      "APM tip: Bursts usually align with cooldown windows—compare with damage spikes.",
+      "Timeline tip: Segment labels help isolate phases—zoom in for precision.",
+    ],
+    []
+  );
+
+  // progress boot sequence (purely cosmetic)
+  useEffect(() => {
+    let raf = 0;
+    const start = performance.now();
+    const duration = 2600;
+
+    const tick = () => {
+      const t = performance.now();
+      const ratio = Math.min(1, (t - start) / duration);
+      const eased = 1 - Math.pow(1 - ratio, 3);
+      setProgress(Math.floor(eased * 100));
+      if (ratio >= 1) {
+        setTimeout(() => setReady(true), 350);
+        return;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  // rotate tips
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setTipIdx((v) => (v + 1) % tips.length);
+    }, 2600);
+    return () => window.clearInterval(id);
+  }, [tips.length]);
+
+  // starfield canvas
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    let raf = 0;
+    let w = 0;
+    let h = 0;
+
+    const rand = (min: number, max: number) => min + Math.random() * (max - min);
+
+    const resize = () => {
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const rect = canvas.getBoundingClientRect();
+      w = Math.max(1, Math.floor(rect.width * dpr));
+      h = Math.max(1, Math.floor(rect.height * dpr));
+      canvas.width = w;
+      canvas.height = h;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    };
+
+    resize();
+    window.addEventListener("resize", resize);
+
+    const stars = new Array(240).fill(0).map(() => ({
+      x: rand(0, w),
+      y: rand(0, h),
+      z: rand(0.2, 1.0),
+      r: rand(0.6, 1.8),
+      vy: rand(0.4, 1.25),
+      tw: rand(0, Math.PI * 2),
+    }));
+
+    const draw = () => {
+      raf = requestAnimationFrame(draw);
+      ctx.clearRect(0, 0, w, h);
+
+      // subtle vignette
+      const g = ctx.createRadialGradient(w * 0.5, h * 0.5, 0, w * 0.5, h * 0.5, Math.max(w, h) * 0.7);
+      g.addColorStop(0, "rgba(0,0,0,0.00)");
+      g.addColorStop(1, "rgba(0,0,0,0.60)");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+
+      for (const s of stars) {
+        s.tw += 0.04 + s.z * 0.03;
+        const twinkle = 0.55 + 0.45 * Math.sin(s.tw);
+
+        s.y += s.vy * (1 + s.z * 1.4);
+        if (s.y > h + 10) {
+          s.y = -10;
+          s.x = rand(0, w);
+        }
+
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r * (0.6 + s.z), 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${0.10 + 0.25 * twinkle * s.z})`;
+        ctx.fill();
+      }
+    };
+
+    draw();
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+    };
+  }, []);
+
+  const triggerBurst = () => setBurstKey((v) => v + 1);
+
+  const handleSelect = (mode: AnalyzerMode) => {
+    if (!ready || exiting) return;
+    setChosenMode(mode);
+    setExiting(true);
+    triggerBurst();
+    // Let the UI animate out before switching analyzers
+    window.setTimeout(() => onSelect(mode), 750);
+  };
+
+  return (
+    <motion.div
+      className="swg-welcome-root"
+      role="dialog"
+      aria-label="Welcome"
+      initial={{ opacity: 1, scale: 1 }}
+      animate={{ opacity: exiting ? 0 : 1, scale: exiting ? 1.01 : 1 }}
+      exit={{ opacity: 0, scale: 1.01 }}
+      transition={{ duration: 0.55, ease: "easeOut" }}
+    >
+      <style>{`
+        .swg-welcome-root{
+          position:fixed; inset:0; z-index:9999; overflow:hidden;
+          background:#000 url(/mainmenu.jpg) center/55% auto no-repeat;
+          font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+          color:#fff;
+        }
+        .swg-welcome-overlayA{ position:absolute; inset:0; background:linear-gradient(to bottom, rgba(0,0,0,.78), rgba(0,0,0,.25) 45%, rgba(0,0,0,.86)); }
+        .swg-welcome-overlayB{ position:absolute; inset:0; background:radial-gradient(circle at 50% 20%, rgba(255,255,255,.10), rgba(0,0,0,.65) 55%, rgba(0,0,0,.92) 100%); }
+        .swg-welcome-scanlines{ position:absolute; inset:0; opacity:.10; background:repeating-linear-gradient(to bottom, rgba(255,255,255,.06) 0px, rgba(255,255,255,.06) 1px, rgba(0,0,0,0) 6px); mix-blend-mode: overlay; }
+        .swg-welcome-wrap{ position:relative; height:100%; width:100%; max-width:2200px; margin:0 auto; padding:36px 14px; display:flex; flex-direction:column; }
+        .swg-welcome-top{ display:flex; justify-content:space-between; align-items:center; gap:14px; }
+        .swg-welcome-boot{ letter-spacing:.35em; font-size:12px; opacity:.72; }
+        .swg-welcome-build{ font-size:12px; opacity:.62; background:rgba(255,255,255,.08); padding:6px 10px; border-radius:999px; }
+        .swg-welcome-center{ flex:1; display:grid; align-items:center; grid-template-columns: 1fr 1fr; gap:220px; padding:0 64px; }
+        @media (max-width: 980px){ .swg-welcome-center{ grid-template-columns: 1fr; } }
+        .swg-welcome-center > div:first-child{ justify-self:start; }
+        .swg-welcome-panel{ justify-self:end; }
+        @media (max-width: 1200px){ .swg-welcome-center{ padding:0 24px; gap:64px; } }
+        @media (max-width: 980px){ .swg-welcome-center{ padding:0; } .swg-welcome-panel{ justify-self:start; } }
+
+        .swg-welcome-title{
+          font-size:44px; line-height:1.05; font-weight:800;
+          text-shadow: 0 0 22px rgba(255,255,255,.22), 0 0 60px rgba(120,200,255,.14);
+        }
+        .swg-welcome-sub{ margin-top:12px; font-size:14px; opacity:.78; max-width:760px; }
+        .swg-welcome-panel{
+          background: rgba(0,0,0,.42); border:1px solid rgba(255,255,255,.14);
+          border-radius: 18px; padding:18px 18px 16px;
+          box-shadow: 0 18px 60px rgba(0,0,0,.45);
+          backdrop-filter: blur(10px);
+        }
+        .swg-welcome-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
+        .swg-welcome-bar{
+          position:relative; height:10px; width:100%; border-radius:999px;
+          background: rgba(255,255,255,.10); overflow:hidden;
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
+        }
+        .swg-welcome-bar > div{
+          height:100%; border-radius:999px;
+          background: linear-gradient(90deg, rgba(255,255,255,.25), rgba(255,255,255,.85), rgba(255,255,255,.25));
+          width: 0%;
+          transition: width 120ms linear;
+        }
+        .swg-welcome-tip{ margin-top:12px; font-size:12px; opacity:.78; min-height:18px; }
+        .swg-welcome-btns{ display:flex; gap:12px; margin-top:14px; }
+        @media (max-width: 520px){ .swg-welcome-btns{ flex-direction:column; } }
+        .swg-btn{
+          position:relative; flex:1;
+          border-radius:14px;
+          padding:12px 14px;
+          background: rgba(255,255,255,.10);
+          border: 1px solid rgba(255,255,255,.18);
+          color:#fff; font-weight:800; letter-spacing:.08em;
+          cursor:pointer;
+          transition: transform 120ms ease, background 160ms ease, border-color 160ms ease;
+          user-select:none;
+          text-transform: uppercase;
+        }
+        .swg-btn:disabled{ opacity:.45; cursor:not-allowed; }
+        .swg-btn:hover:not(:disabled){ transform: translateY(-1px); background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.30); }
+        .swg-btn:active:not(:disabled){ transform: translateY(0px); }
+        .swg-btn::after{
+          content:""; position:absolute; inset:-2px; border-radius:16px;
+          background: radial-gradient(circle at 20% 0%, rgba(255,255,255,.22), rgba(0,0,0,0) 55%);
+          opacity:.35; pointer-events:none;
+        }
+        .swg-badge{
+          display:inline-flex; align-items:center; gap:8px; font-size:11px; opacity:.86;
+          padding:6px 10px; border-radius:999px;
+          background: rgba(0,0,0,.32);
+          border: 1px solid rgba(255,255,255,.12);
+        }
+        .swg-crawl{
+          position:relative; height:120px; overflow:hidden; margin-top:18px;
+          border-radius:16px; border:1px solid rgba(255,255,255,.10);
+          background: rgba(0,0,0,.28);
+        }
+        .swg-crawl-inner{
+          position:absolute; left:0; right:0; bottom:-120px;
+          padding:16px;
+          animation: swgCrawl 12s linear infinite;
+          font-size:12px; opacity:.75; line-height:1.6;
+          text-align:center;
+        }
+        @keyframes swgCrawl{
+          0%{ transform: translateY(0) skewX(-4deg); opacity:.0;}
+          6%{ opacity:.75;}
+          100%{ transform: translateY(-360px) skewX(-4deg); opacity:0;}
+        }
+        .swg-holo{
+          margin-top:14px;
+          display:flex; flex-wrap:wrap; gap:10px;
+          opacity:.85;
+        }
+        .swg-holo span{
+          border:1px solid rgba(255,255,255,.12);
+          background: rgba(255,255,255,.08);
+          padding:8px 10px; border-radius:12px;
+          font-size:11px; letter-spacing:.10em;
+        }
+      `}</style>
+
+      <canvas
+        ref={canvasRef}
+        className="swg-welcome-canvas"
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", mixBlendMode: "screen", opacity: 0.9 }}
+      />
+
+      <div className="swg-welcome-overlayA" />
+      <div className="swg-welcome-overlayB" />
+      <div className="swg-welcome-scanlines" />
+
+      {/* hyperspace burst overlay */}
+      <AnimatePresence>
+        {burstKey > 0 && (
+          <motion.div
+            key={burstKey}
+            style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.55 }}
+          >
+            {Array.from({ length: 46 }).map((_, i) => (
+              <motion.div
+                key={i}
+                style={{
+                  position: "absolute",
+                  left: "50%",
+                  top: "50%",
+                  width: 320,
+                  height: 2,
+                  transformOrigin: "0% 50%",
+                  transform: `rotate(${(360 / 46) * i + 7.5}deg) translateX(0px)`,
+                  borderRadius: 999,
+                  background:
+                    "linear-gradient(90deg, rgba(255,255,255,0.0), rgba(255,255,255,0.65), rgba(255,255,255,0.0))",
+                  filter: "blur(0.8px)",
+                }}
+                initial={{ opacity: 0, scaleX: 0.05 }}
+                animate={{ opacity: 0.75, scaleX: 1.15 }}
+                exit={{ opacity: 0, scaleX: 0.05 }}
+                transition={{ duration: 0.55, ease: "easeOut" }}
+              />
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="swg-welcome-wrap">
+        <div className="swg-welcome-top">
+          <div className="swg-welcome-boot">SWG • LOG ANALYZER • INITIALIZING</div>
+          <div className="swg-welcome-build">Boot: {progress}%</div>
+        </div>
+
+        <div className="swg-welcome-center">
+          <div>
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.9, ease: "easeOut" }}
+              className="swg-welcome-title"
+            >
+              Welcome to the
+              <br />
+              Star Wars Galaxies
+              <br />
+              Log Analyzer
+            </motion.div>
+
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.15, duration: 0.9, ease: "easeOut" }}
+              className="swg-welcome-sub"
+            >
+              Your combat telemetry, decoded. Choose a mode to proceed.
+            </motion.div>
+
+            <div className="swg-holo">
+              <span>CRIT%</span>
+              <span>DPS/HPS</span>
+              <span>SEGMENTS</span>
+              <span>UTILITY</span>
+              <span>DEATHS</span>
+              <span>COMPARE</span>
+            </div>
+          </div>
+
+          <motion.div
+            className="swg-welcome-panel"
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.85, ease: "easeOut" }}
+          >
+            <div className="swg-welcome-row" style={{ marginBottom: 8 }}>
+              <div className="swg-badge">SYSTEM STATUS</div>
+              <div style={{ fontSize: 12, opacity: 0.8 }}>
+                {ready ? "READY" : "LOADING"}
+              </div>
+            </div>
+
+            <div className="swg-welcome-bar" aria-label="Loading">
+              <div style={{ width: `${progress}%` }} />
+            </div>
+
+            <div className="swg-welcome-tip">
+              <AnimatePresence mode="wait">
+                <motion.div
+                  key={tipIdx}
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  transition={{ duration: 0.25 }}
+                >
+                  {tips[tipIdx]}
+                </motion.div>
+              </AnimatePresence>
+            </div>
+
+            <div className="swg-welcome-btns">
+              <button
+                className="swg-btn"
+                disabled={!ready}                onClick={() => handleSelect("pve")}
+              >
+                PVE Analyzer
+              </button>
+
+              <button
+                className="swg-btn"
+                disabled={!ready}                onClick={() => handleSelect("pvp")}
+              >
+                PVP Analyzer
+              </button>
+            </div>
+
+            {exiting && (
+              <div className="swg-exit-overlay" aria-hidden>
+                <div className="swg-exit-panel">
+                  <div className="swg-exit-title">Engaging Hyperdrive</div>
+                  <div className="swg-exit-sub">
+                    Loading {chosenMode === "pvp" ? "PVP" : "PVE"} Analyzer…
+                  </div>
+                  <div className="swg-exit-bar">
+                    <div className="swg-exit-fill" />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="swg-crawl" aria-hidden>
+              <div className="swg-crawl-inner">
+                <div style={{ fontWeight: 800, letterSpacing: ".18em", opacity: 0.95 }}>
+                  INITIALIZING ANALYSIS CORE
+                </div>
+                <div style={{ marginTop: 10 }}>
+                  Parsing • Normalization • Event Linking • Outcome Inference • Segment Mapping
+                </div>
+                <div style={{ marginTop: 10 }}>
+                  May your crits be plentiful and your overheal be intentional.
+                </div>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 12, fontSize: 11, opacity: 0.65, lineHeight: 1.5 }}>
+              Note: PVP mode will share the same app + files; we’ll unlock the PVP-specific views next.
+            </div>
+          </motion.div>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11, opacity: 0.55 }}>
+          <div>© {new Date().getFullYear()} • SWG Log Analyzer</div>
+          <div>“Punch it.”</div>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 /* ========================= Main App ========================= */
 
 export default function App(){
+  const [showWelcome, setShowWelcome] = useState<boolean>(true);
+  const [analyzerMode, setAnalyzerMode] = useState<AnalyzerMode>("pve");
   const [focusLine, setFocusLine] = React.useState<string | null>(null);
   // raw/unfiltered results from worker
 const [timelineStep, setTimelineStep] = useState<number>(1);
@@ -1565,13 +2627,54 @@ const [basePerAbilityTargets, setBasePerAbilityTargets] = useState<PerAbilityTar
 const [basePerTaken, setBasePerTaken] = useState<Record<string, number>>({});
 const [basePerTakenBy, setBasePerTakenBy] = useState<Record<string, Record<string, number>>>({});
 
-const [damageEvents, setDamageEvents] = useState<DamageEvent[]>([]);
+const [damageEvents, setDamageEvents] = useState<DFEvent[]>([]);
 const [healEvents, setHealEvents] = useState<HealEvent[]>([]);
 const [utilityEvents, setUtilityEvents] = useState<UtilityEvent[]>([]);
 const [deathEvents, setDeathEvents] = useState<Array<{t:number; name:string}>>([]);
 const [duration, setDuration] = useState<number>(0);
 const [debug, setDebug] = useState<any>(null);
+
+const [exporting, setExporting] = useState(false);
+const [exportToast, setExportToast] = useState<string | null>(null);
+
+// Cache the last rendered export blob so clipboard copy can happen immediately on click
+// (avoids browsers denying image clipboard writes after long async work).
+const exportBlobRef = useRef<Blob | null>(null);
+const exportBlobKeyRef = useRef<string>("");
+
+// Prevent exporting until the export snapshot is fully ready (incl. class colors).
+// This avoids the "export twice to get colors" behavior after a fresh parse.
+const [exportReady, setExportReady] = useState<boolean>(false);
+
 const lastParsedTextRef = useRef<string>("");
+
+	// --- Dynamic player/NPC name aliasing (merge short vs full names safely) ---
+	// This avoids runtime errors in render (e.g., death snapshot dropdown) and keeps
+	// names consistent when logs sometimes use short vs full variants.
+	const dynLongestByFirst = useMemo(() => {
+		const GENERIC_TOKENS = new Set(['a','an','the','with','using']);
+		const longest: Record<string,string> = {};
+		const learn = (n?: string) => {
+			const raw = String(n || '').trim();
+			if (!raw) return;
+			const ft = normName(raw.split(/\s+/)[0] || '');
+			if (!ft || GENERIC_TOKENS.has(ft)) return;
+			const cur = longest[ft];
+			if (!cur || raw.length > cur.length) longest[ft] = raw;
+		};
+		damageEvents.forEach(e => learn(e.src));
+		healEvents.forEach(e => learn(e.src));
+		(baseRows || []).forEach(r => learn(r.name));
+		return { longest, GENERIC_TOKENS };
+	}, [damageEvents, healEvents, baseRows]);
+
+	const canonDyn = useCallback((n?: string) => {
+		const raw = String(n || '').trim();
+		if (!raw) return '';
+		const ft = normName(raw.split(/\s+/)[0] || '');
+		if (!ft || dynLongestByFirst.GENERIC_TOKENS.has(ft)) return raw;
+		return normalizeActorName(dynLongestByFirst.longest[ft] || raw);
+	}, [dynLongestByFirst]);
 
 
   // Allowed player professions
@@ -1591,8 +2694,8 @@ const playersWithClass = useMemo(() => {
   const longest: Record<string,string> = {};
   const profByKey: Record<string,string> = {};
   for (const r of rows) {
-    const raw = String(r.name||'').trim();
-    const key = raw.split(/\s+/)[0]?.toLowerCase() || '';
+    const raw = stripTrailingApostrophe(String(r.name||'').trim());
+    const key = normName(raw.split(/\s+/)[0] || '');
     if (!key) continue;
 
     const prof = String(r.profession||'').trim();
@@ -1605,8 +2708,8 @@ const playersWithClass = useMemo(() => {
   const out: { name: string; profession?: string }[] = [];
   const seen = new Set<string>();
   for (const r of rows) {
-    const raw = String(r.name||'').trim();
-    const key = raw.split(/\s+/)[0]?.toLowerCase() || '';
+    const raw = stripTrailingApostrophe(String(r.name||'').trim());
+    const key = normName(raw.split(/\s+/)[0] || '');
     const can = longest[key] || raw;
     if (!seen.has(can)) {
       seen.add(can);
@@ -1684,16 +2787,12 @@ const playersWithClass = useMemo(() => {
   const [timeline, setTimeline] = useState<Array<{t:number; dps:number; hps:number}>>([]);
   
   // --- Downsample timeline for performance (target ~N points) ---
-const TARGET_POINTS = 30; // set to 5 so you can clearly see it working
-const timelineView = useMemo(
-  () => downsampleToTarget(timeline, TARGET_POINTS),
-  [timeline, TARGET_POINTS]
-);
-
-// (optional) quick sanity log
-useEffect(() => {
-  console.log("timeline:", timeline.length, "timelineView:", timelineView.length, "TARGET_POINTS:", TARGET_POINTS);
-}, [timeline, timelineView, TARGET_POINTS]);
+  // 30 points was too chunky visually; keep it light but readable.
+  const TARGET_POINTS = 240;
+  const timelineView = useMemo(
+    () => downsampleToTarget(timeline, TARGET_POINTS),
+    [timeline, TARGET_POINTS]
+  );
 const [perSrc, setPerSrc] = useState<Record<string, number[]>>({});
   const [perAbility, setPerAbility] = useState<PerAbility>({});
   const [perAbilityTargets, setPerAbilityTargets] = useState<PerAbilityTargets>({});
@@ -1746,7 +2845,13 @@ const openPlayerSummary = React.useCallback(() => {
   setTimeout(() => setPsOpen(true), LOADER_OPEN_DELAY_MS);
   setTimeout(() => setPsLoading(false), LOADER_MIN_MS);
 }, [LOADER_OPEN_DELAY_MS, LOADER_MIN_MS, pA, pB]);
-  const [mode, setMode] = useState<'sources'|'abilities'|'statistics'>('sources'); // <- extended
+  const [mode, setMode] = useState<'sources'|'abilities'|'statistics'|'damageTaken'>('sources'); // <- extended
+  const DEATH_SNAPSHOT_SEC = 10;
+const DEATH_SNAPSHOT_BIN = 1; // seconds per bin (log timestamps are second-granularity)
+
+  const [selectedDeathKey, setSelectedDeathKey] = useState<string>('');
+  const [deathBinHover, setDeathBinHover] = useState<number | null>(null);
+  useEffect(() => { setDeathBinHover(null); }, [selectedDeathKey]);
   const [smooth, setSmooth] = useState(true);
   const workerRef = useRef<Worker|null>(null);
 
@@ -1799,6 +2904,767 @@ const resetWindow = useCallback(() => {
       selRafRef.current = null;
     };
   }, []);
+
+  const handleParsingExport = useCallback(async () => {
+    let exportBlob: Blob | null = null;
+    try {
+      if (exporting) return;
+      // Fast-path: if we already have a fresh export blob, copy immediately (keeps user-gesture intact)
+      const exportKeyNow = `${lastParsedTextRef.current.length}|${rows?.length ?? 0}|${segments?.length ?? 0}|${psSelectedPlayers.join(",")}|${mode}`;
+      if (exportBlobRef.current && exportBlobKeyRef.current === exportKeyNow) {
+        try {
+          const ClipboardItemAny = (window as any).ClipboardItem;
+          if (!navigator.clipboard || !ClipboardItemAny) throw new Error("Clipboard image copy not supported in this browser/context.");
+          await navigator.clipboard.write([new ClipboardItemAny({ "image/png": exportBlobRef.current })]);
+          setExportToast("Copied! Paste it anywhere.");
+          setTimeout(() => setExportToast(null), 2500);
+          return;
+        } catch (e) {
+          // If immediate copy fails, fall through and rebuild+retry below.
+        }
+      }
+
+      setExporting(true);
+      setExportToast("Building export…");
+
+      const tStart = performance.now();
+
+      // --- Build a stable canonicalizer (same idea as applyWindow) ---
+      const GENERIC_TOKENS = new Set(["a","an","the","with","using"]);
+      const LONGEST_BY_FIRST: Record<string,string> = {};
+      const firstKey = (raw: string) => {
+        const first = (raw || "").trim().split(/\s+/)[0] || "";
+        return normName(first);
+      };
+      const learn = (n?: string) => {
+        const raw = String(n || "").trim();
+        if (!raw) return;
+        const fk = firstKey(raw);
+        if (!fk || GENERIC_TOKENS.has(fk)) return;
+        const cur = LONGEST_BY_FIRST[fk];
+        if (!cur || raw.length > cur.length) LONGEST_BY_FIRST[fk] = raw;
+      };
+
+      for (const e of damageEvents) learn(e?.src);
+      for (const e of healEvents) learn(e?.src);
+      for (const r of baseRows) learn(r?.name);
+
+      const canonDyn = (n: string) => {
+        const raw = String(n || "").trim();
+        const fk = firstKey(raw);
+        if (!fk || GENERIC_TOKENS.has(fk)) return normalizeActorName(raw);
+        return normalizeActorName(LONGEST_BY_FIRST[fk] || raw);
+      };
+
+      const topN = (m: Record<string, number>, n = 5) =>
+        Object.entries(m)
+          .filter(([, v]) => Number.isFinite(v) && v > 0)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, n);
+
+      type SegSnap = {
+        label: string;
+        start: number;
+        end: number;
+        dur: number;
+        dmgTop: Array<[string, number]>;
+        healTop: Array<[string, number]>;
+        apmTop: Array<[string, number]>;
+      };
+
+      const segs = (segments || []).filter(s => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start);
+
+      // --- Segment combining rules for export ---
+      // 1) If the same segment label appears multiple times (e.g., Exar Kun split into two),
+      //    merge them and sum damage/heal/action seconds across the parts.
+      // 2) If there are lots of segments, collapse the classic 5-instance run into a single
+      //    "OG Heroic Instances" row to keep the export readable. APM is derived from
+      //    total action-seconds / total minutes (i.e., a duration-weighted average).
+      const normalizeSegmentName = (label: string) => {
+        const base = (label || "")
+          .replace(/^\s*\d+\s*\.?\s*/g, "") // "1. " prefix
+          .replace(/\s+—\s+.*$/g, "")          // anything after em dash (time range)
+          .trim();
+        return base;
+      };
+
+      const isOGHeroic = (name: string) => {
+        const n = (name || "").toLowerCase();
+        return (
+          n.includes("tusken king") ||
+          n.includes("axkva") || // Axkva Min
+          n.includes("ig-88") || n.includes("ig 88") || n.startsWith("ig88") ||
+          n.includes("exar kun") ||
+          n === "isd" || n.includes(" isd") || n.includes("imperial star destroyer")
+        );
+      };
+
+      type ExportSeg = {
+        label: string;                 // display label
+        baseName: string;              // normalized name used for grouping
+        parts: typeof segs;            // original segment parts
+        start: number;                 // earliest start among parts
+        end: number;                   // latest end among parts
+        duration: number;              // sum of part durations
+      };
+
+      const mergeByBaseName = (input: typeof segs): ExportSeg[] => {
+        const groups = new Map<string, ExportSeg>();
+        for (const s of input) {
+          const baseName = normalizeSegmentName((s as any).label || "");
+          const key = baseName || ((s as any).label || "");
+          const dur = ((s as any).end - (s as any).start);
+          const existing = groups.get(key);
+          if (!existing) {
+            groups.set(key, {
+              label: (s as any).label || baseName || "Segment",
+              baseName: key,
+              parts: [s],
+              start: (s as any).start,
+              end: (s as any).end,
+              duration: dur,
+            });
+          } else {
+            existing.parts.push(s);
+            existing.start = Math.min(existing.start, (s as any).start);
+            existing.end = Math.max(existing.end, (s as any).end);
+            existing.duration += dur;
+            if ((existing.label || "").length > ((s as any).label || "").length && ((s as any).label || "").length > 0) {
+              existing.label = (s as any).label;
+            }
+          }
+        }
+        return Array.from(groups.values()).sort((a, b) => a.start - b.start);
+      };
+
+      const mergeSegmentsForExport = (input: typeof segs): ExportSeg[] => {
+        let merged = mergeByBaseName(input);
+
+        if (merged.length > 5) {
+          const og = merged.filter(s => isOGHeroic(s.baseName));
+          const rest = merged.filter(s => !isOGHeroic(s.baseName));
+          if (og.length >= 2) {
+            const ogSeg: ExportSeg = {
+              label: "OG Heroic Instances",
+              baseName: "OG Heroic Instances",
+              parts: og.flatMap(s => s.parts),
+              start: Math.min(...og.map(s => s.start)),
+              end: Math.max(...og.map(s => s.end)),
+              duration: og.reduce((acc, s) => acc + s.duration, 0),
+            };
+            merged = [ogSeg, ...rest].sort((a, b) => a.start - b.start);
+          }
+        }
+
+        return merged;
+      };
+
+      const exportSegs = mergeSegmentsForExport(segs);
+
+      const MAX_SEGS = 8;
+      const segsToRender = exportSegs.slice(0, MAX_SEGS);
+
+      const snaps: SegSnap[] = segsToRender.map((s) => {
+        const displayName = normalizeSegmentName(s.label || s.baseName || "Segment") || (s.label || "Segment");
+
+        // Use per-part ranges so merged/non-contiguous segments aggregate correctly.
+        const ranges = (s.parts || []).map(p => {
+          const a = Math.max(0, Math.floor((p as any).start));
+          const b = Math.max(a, Math.floor((p as any).end));
+          return [a, b] as const;
+        }).sort((a, b) => a[0] - b[0]);
+
+        const start = ranges.length ? ranges[0][0] : Math.max(0, Math.floor(s.start));
+        const end = ranges.length ? ranges[ranges.length - 1][1] : Math.max(start, Math.floor(s.end));
+
+        const dur = Math.max(1, Math.round(s.duration || ranges.reduce((acc, r) => acc + (r[1] - r[0]), 0) || (end - start)));
+        const inRanges = (t: number) => {
+          for (const r of ranges) {
+            if (t < r[0]) return false;
+            if (t >= r[0] && t <= r[1]) return true;
+          }
+          return ranges.length === 0 ? (t >= start && t <= end) : false;
+        };
+
+        const dmgBy: Record<string, number> = {};
+        const healBy: Record<string, number> = {};
+
+        for (const e of damageEvents) {
+          if (!e) continue;
+          const t = e.t;
+          if (!inRanges(t)) continue;
+          const src = canonDyn(e.src);
+          dmgBy[src] = (dmgBy[src] || 0) + (e.amount || 0);
+        }
+        for (const e of healEvents) {
+          if (!e) continue;
+          const t = e.t;
+          if (!inRanges(t)) continue;
+          const src = canonDyn(e.src);
+          healBy[src] = (healBy[src] || 0) + (e.amount || 0);
+        }
+
+        // APM: count unique action-seconds (damage OR utility) per actor within the segment.
+        const actionSecondsBy: Record<string, number> = {};
+        const seen = new Set<string>();
+
+        for (const e of damageEvents) {
+          if (!e) continue;
+          const t = e.t;
+          if (!inRanges(t)) continue;
+          const actor = canonDyn(e.src);
+          const k = actor + "@" + t;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          actionSecondsBy[actor] = (actionSecondsBy[actor] || 0) + 1;
+        }
+        for (const e of utilityEvents) {
+          if (!e) continue;
+          const t = (e as any).t;
+          if (!Number.isFinite(t)) continue;
+          if (!inRanges(t)) continue;
+          const actor = canonDyn((e as any).src);
+          const k = actor + "@" + t;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          actionSecondsBy[actor] = (actionSecondsBy[actor] || 0) + 1;
+        }
+
+        const minutes = Math.max(1, dur / 60);
+        const apmBy: Record<string, number> = {};
+        for (const [actor, secs] of Object.entries(actionSecondsBy)) {
+          apmBy[actor] = secs / minutes;
+        }
+
+        const dmgTop = topN(dmgBy, 5);
+        const healTop = topN(healBy, 5);
+        const apmTop = Object.entries(apmBy)
+          .filter(([, v]) => Number.isFinite(v) && v > 0)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .map(([k, v]) => [k, Math.round(v)] as [string, number]);
+
+        return {
+          label: displayName,
+          start,
+          end,
+          dur,
+          dmgTop,
+          healTop,
+          apmTop,
+        };
+      });
+      // Overall totals for the current window (same window as the export duration)
+      const overallStart = Math.max(0, Math.floor(windowStart || 0));
+      const overallEnd = Math.max(overallStart, Math.floor(windowEnd || 0));
+      const overallDur = Math.max(1, overallEnd - overallStart + 1);
+
+      const totalDmgBy: Record<string, number> = {};
+      const totalHealBy: Record<string, number> = {};
+
+      for (const e of damageEvents) {
+        if (!e) continue;
+        const t = e.t;
+        if (t < overallStart || t > overallEnd) continue;
+        const src = canonDyn(e.src);
+        totalDmgBy[src] = (totalDmgBy[src] || 0) + (e.amount || 0);
+      }
+      for (const e of healEvents) {
+        if (!e) continue;
+        const t = e.t;
+        if (t < overallStart || t > overallEnd) continue;
+        const src = canonDyn(e.src);
+        totalHealBy[src] = (totalHealBy[src] || 0) + (e.amount || 0);
+      }
+
+      // APM totals: unique action-seconds (damage OR utility) per actor within the window.
+      const totalActionSecondsBy: Record<string, number> = {};
+      const seenTotal = new Set<string>();
+
+      for (const e of damageEvents) {
+        if (!e) continue;
+        const t = e.t;
+        if (t < overallStart || t > overallEnd) continue;
+        const actor = canonDyn(e.src);
+        const k = actor + "@" + t;
+        if (seenTotal.has(k)) continue;
+        seenTotal.add(k);
+        totalActionSecondsBy[actor] = (totalActionSecondsBy[actor] || 0) + 1;
+      }
+      for (const e of utilityEvents) {
+        if (!e) continue;
+        const t = (e as any).t;
+        if (!Number.isFinite(t)) continue;
+        if (t < overallStart || t > overallEnd) continue;
+        const actor = canonDyn((e as any).src);
+        const k = actor + "@" + t;
+        if (seenTotal.has(k)) continue;
+        seenTotal.add(k);
+        totalActionSecondsBy[actor] = (totalActionSecondsBy[actor] || 0) + 1;
+      }
+
+      const overallMinutes = Math.max(1, overallDur / 60);
+      const totalApmBy: Record<string, number> = {};
+      for (const [actor, secs] of Object.entries(totalActionSecondsBy)) {
+        totalApmBy[actor] = secs / overallMinutes;
+      }
+
+      const totalHealTop = topN(totalHealBy, 6);
+      const topHealerName = totalHealTop[0]?.[0];
+
+      let totalDmgTop = topN(totalDmgBy, 8);
+      // Reserve the 8th slot for the top healer so they are always represented in the totals block.
+      if (topHealerName && !totalDmgTop.some(([n]) => n === topHealerName)) {
+        const healerDmg: number = (totalDmgBy as any)?.[topHealerName] ?? 0;
+        if (totalDmgTop.length < 8) totalDmgTop = [...totalDmgTop, [topHealerName, healerDmg]];
+        else totalDmgTop = [...totalDmgTop.slice(0, 7), [topHealerName, healerDmg]];
+      }
+      // Ensure max length is 8
+      totalDmgTop = totalDmgTop.slice(0, 8);
+      const totalApmTop = Object.entries(totalApmBy)
+        .filter(([, v]) => Number.isFinite(v) && v > 0)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
+        .map(([k, v]) => [k, Math.round(v)] as [string, number]);
+
+      const totalDamageSum = Object.values(totalDmgBy).reduce((s, v) => s + (v || 0), 0);
+      const totalHealingSum = Object.values(totalHealBy).reduce((s, v) => s + (v || 0), 0);
+// Ensure class colors are available before rendering the export (so users don't need to export twice).
+// These "entries" are local variables created above (totalDmgTop / totalHealTop / totalApmTop and per-segment snaps).
+const dmgEntries = totalDmgTop;
+const healEntries = totalHealTop;
+
+const snapNames: string[] = snaps.flatMap((s) => [
+  ...s.dmgTop.map((r) => r[0]),
+  ...s.healTop.map((r) => r[0]),
+  ...s.apmTop.map((r) => r[0]),
+]);
+
+const neededColorNames = Array.from(
+  new Set<string>([
+    ...dmgEntries.map((r) => r[0]),
+    ...healEntries.map((r) => r[0]),
+    ...totalApmTop.map((r) => r[0]),
+    ...snapNames,
+  ])
+).filter((n) => !isLikelyNpcName(n));
+
+const colorsReady = async (timeoutMs = 6000) => {
+        const start = performance.now();
+        const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        while (performance.now() - start < timeoutMs) {
+          let ok = true;
+          const profMap = professionByCanonRef.current || {};
+          const inferMap = inferredClassesRef.current || {};
+          for (const n of neededColorNames) {
+            if (!n) continue;
+            if (isLikelyNpcName(n)) continue;
+            if (profMap[n] || inferMap[n]) continue;
+            ok = false;
+            break;
+          }
+          if (ok) return true;
+          await sleep(60);
+        }
+        return false;
+      };
+
+      const readyNow = await colorsReady();
+      if (!readyNow) {
+        // Don't block exports just because class inference hasn't finished for everyone.
+        // We'll export using fallback colors for any unknown classes.
+        setExportToast("Some class colors are still loading — exporting with defaults.");
+      }
+
+
+
+      // --- Render an image using Canvas2D ---
+      const W = 1500;
+      const line = 22;
+      const totalsY0 = 156;
+      const maxRows = 8;
+      const lineT = 18;
+      // Header height needs to fit totals + lists; keep generous padding to avoid overlap.
+      const headerH = totalsY0 + 26 + 22 + maxRows * lineT + 78;
+      const perSegH = 220;
+      const extraSegs = Math.max(0, exportSegs.length - segsToRender.length);
+      const H = headerH + snaps.length * perSegH + (extraSegs ? 48 : 0) + 40;
+
+      const canvas = document.createElement("canvas");
+      canvas.width = W;
+      canvas.height = H;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("No canvas context");
+
+      // background image (same as app UI)
+      const loadImg = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error(`Failed to load image: ${src}`));
+        img.src = src;
+      });
+
+      let bgImg: HTMLImageElement | null = null;
+      try {
+        bgImg = await loadImg("/background.jpg");
+      } catch {
+        bgImg = null;
+      }
+
+      // background
+
+      if (bgImg) {
+        const iw = bgImg.naturalWidth || bgImg.width;
+        const ih = bgImg.naturalHeight || bgImg.height;
+        const s = Math.max(W / Math.max(1, iw), H / Math.max(1, ih));
+        const dw = iw * s;
+        const dh = ih * s;
+        const dx = (W - dw) / 2;
+        const dy = (H - dh) / 2;
+        ctx.drawImage(bgImg, dx, dy, dw, dh);
+        // darken for readability
+        ctx.fillStyle = "rgba(4,8,16,0.62)";
+        ctx.fillRect(0, 0, W, H);
+      } else {
+        const grad = ctx.createLinearGradient(0, 0, 0, H);
+        grad.addColorStop(0, "rgba(10,18,34,1)");
+        grad.addColorStop(1, "rgba(6,10,20,1)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+      }
+
+      // subtle grid
+      ctx.globalAlpha = 0.08;
+      ctx.strokeStyle = "#79c7ff";
+      for (let x = 0; x < W; x += 60) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      }
+      for (let y = 0; y < H; y += 60) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+
+      const pad = 36;
+
+      // title
+      ctx.fillStyle = "#eaf6ff";
+      ctx.font = "700 34px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.fillText("PARSING EXPORT", pad, 54);
+
+      ctx.fillStyle = "#9bb7df";
+      ctx.font = "500 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      const now = new Date();
+      ctx.fillText(now.toLocaleString(), pad, 78);
+
+      const fullDur = toMMSS(duration || 0);
+      const parseMs = (debug && (debug.parseMs ?? debug.parseTimeMs ?? debug.workerMs)) as any;
+      const parseTimeTxt = Number.isFinite(parseMs) ? `${Math.round(parseMs)} ms parse` : "parse time n/a";
+
+      ctx.fillStyle = "#bfe1ff";
+      ctx.font = "600 16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.fillText(`Full duration: ${fullDur}  •  ${parseTimeTxt}`, pad, 110);
+
+      ctx.fillStyle = "rgba(121,199,255,0.22)";
+      ctx.fillRect(pad, 126, W - pad * 2, 1);
+
+      // columns
+      const col1 = pad;
+      const col2 = Math.round(W * 0.40);
+      const col3 = Math.round(W * 0.70);
+
+      const drawBlockTitle = (t: string, x: number, y: number) => {
+        ctx.fillStyle = "#d8f1ff";
+        ctx.font = "700 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        ctx.fillText(t, x, y);
+      };
+
+      const drawRow = (name: string, val: string, x: number, y: number) => {
+        ctx.fillStyle = "#d7e7ff";
+        ctx.font = "500 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        ctx.fillText(name, x, y);
+
+        ctx.fillStyle = "#eaf6ff";
+        ctx.font = "700 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        const w = ctx.measureText(val).width;
+        ctx.fillText(val, x + 360 - w, y);
+      };
+
+      const rgbaFromHex = (hex: string, a: number) => {
+        const h = (hex || "").replace("#", "");
+        const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+        const r = parseInt(full.slice(0, 2) || "00", 16);
+        const g = parseInt(full.slice(2, 4) || "00", 16);
+        const b = parseInt(full.slice(4, 6) || "00", 16);
+        return `rgba(${r},${g},${b},${a})`;
+      };
+      // Build a fast profession lookup from the already-rendered source rows.
+      // This avoids a delay where inferredClasses may still be computing after a big parse.
+      const professionByCanon: Record<string, string> = {};
+      for (const r of baseRows as any[]) {
+        const cn = canonDyn(r?.name ?? "");
+        const prof = r?.profession;
+        if (cn && prof && !professionByCanon[cn]) professionByCanon[cn] = prof;
+      }
+
+      // Export bar color: prefer immediate profession data; fall back to inferred classes; be resilient to name variants.
+      const exportBarColor = (name: string) => {
+        try {
+          const cn = canonDyn(name);
+          const profImmediate = professionByCanon[cn] || professionByCanon[name];
+
+          const ic: any = (inferredClassesRef.current || {}) as any;
+          const direct = ic?.[name];
+          const norm = typeof normalizeActorName === "function" ? normalizeActorName(name) : name;
+          const byNorm = ic?.[norm] || ic?.[cn];
+
+          return classColor(profImmediate ?? direct ?? byNorm);
+        } catch {
+          return "#79c7ff";
+        }
+      };
+
+      // NPC/encounter names often have these patterns; used for APM averaging fallback.
+
+      const drawRowBar = (name: string, valNum: number, x: number, y: number, maxVal: number, valFmt?: (v:number)=>string) => {
+        const val = valFmt ? valFmt(valNum) : fmt0(Math.round(valNum));
+        const base = exportBarColor(name);
+
+        // name
+        ctx.save();
+        ctx.font = "600 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        ctx.fillStyle = "#d7e7ff";
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(0,0,0,0.55)";
+        ctx.strokeText(name, x, y);
+        ctx.fillText(name, x, y);
+        ctx.restore();
+
+        // bar
+        // Leave a clear gap between the bar end and the number pill so viewers can see the bar's true end.
+        const barX = x + 155;
+        const barW = 160;
+        const barH = 10;
+        const barY = y - 11;
+        const p = maxVal > 0 ? Math.max(0, Math.min(1, valNum / maxVal)) : 0;
+
+        // track
+        ctx.fillStyle = "rgba(255,255,255,0.10)";
+        ctx.fillRect(barX, barY, barW, barH);
+
+        // fill (class-colored)
+        const fillW = Math.max(2, Math.round(barW * p));
+        ctx.fillStyle = rgbaFromHex(base, 0.88);
+        ctx.fillRect(barX, barY, fillW, barH);
+
+        // end-cap highlight so the bar end is readable even when the value pill sits nearby
+        const endX = barX + fillW;
+        ctx.fillStyle = rgbaFromHex(base, 1);
+        ctx.fillRect(Math.max(barX, endX - 2), barY - 1, 2, barH + 2);
+
+        // value pill (placed *outside* the bar area) so the numbers never hide the bar end
+        ctx.save();
+        ctx.font = "900 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        const w = ctx.measureText(val).width;
+        const gap = 12;
+        const vx = barX + barW + gap;
+        const pillPadX = 6;
+        const pillW = w + pillPadX * 2;
+        const pillH = 18;
+        const pillX = vx - pillPadX;
+        const pillY = y - 14;
+
+        // rounded rect pill
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        ctx.strokeStyle = "rgba(255,255,255,0.14)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        const r = 7;
+        ctx.moveTo(pillX + r, pillY);
+        ctx.arcTo(pillX + pillW, pillY, pillX + pillW, pillY + pillH, r);
+        ctx.arcTo(pillX + pillW, pillY + pillH, pillX, pillY + pillH, r);
+        ctx.arcTo(pillX, pillY + pillH, pillX, pillY, r);
+        ctx.arcTo(pillX, pillY, pillX + pillW, pillY, r);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // text
+        ctx.fillStyle = "#f4fbff";
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(0,0,0,0.75)";
+        ctx.strokeText(val, vx, y);
+        ctx.fillText(val, vx, y);
+        ctx.restore();
+      };;
+
+
+      // --- Totals (overall) -------------------------------------------------
+
+      ctx.fillStyle = "#9bb7df";
+      ctx.font = "700 13px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.fillText("TOTALS (window)", pad, totalsY0 - 18);
+
+      // headline totals
+      ctx.fillStyle = "#eaf6ff";
+      ctx.font = "800 18px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.fillText(`Damage: ${fmt0(Math.round(totalDamageSum))}`, col1, totalsY0);
+      ctx.fillText(`Healing: ${fmt0(Math.round(totalHealingSum))}`, col2, totalsY0);
+      let ty = totalsY0 + 26;
+      drawBlockTitle("Top damage sources", col1, ty);
+      drawBlockTitle("Top healing sources", col2, ty);
+      drawBlockTitle("Top APM", col3, ty);
+      ty += 22;
+
+      const maxD = Math.max(1, ...totalDmgTop.map(([,v]) => v));
+      const maxH = Math.max(1, ...totalHealTop.map(([,v]) => v));
+      const maxA = Math.max(1, ...totalApmTop.map(([,v]) => v));
+
+      for (let r = 0; r < maxRows; r++) {
+        const d = totalDmgTop[r];
+        const h = totalHealTop[r];
+        const a = totalApmTop[r];
+
+        if (d) drawRowBar(d[0], d[1], col1, ty, maxD);
+        if (h) drawRowBar(h[0], h[1], col2, ty, maxH);
+        if (a) drawRowBar(a[0], a[1], col3, ty, maxA, (v)=>String(Math.round(v)));
+
+        ty += lineT;
+      }
+
+      ctx.fillStyle = "rgba(121,199,255,0.22)";
+      ctx.fillRect(pad, headerH - 18, W - pad * 2, 1);
+
+      let y = headerH;
+
+      snaps.forEach((s, i) => {
+        // segment header pill
+        const title = `${i + 1}. ${s.label}`;
+        ctx.fillStyle = "rgba(33,212,253,0.12)";
+        ctx.strokeStyle = "rgba(120,170,255,0.35)";
+              // rounded rect helper
+      const rr = (x:number,y:number,w:number,h:number,r:number) => {
+        const rad = Math.min(r, w/2, h/2);
+        ctx.beginPath();
+        ctx.moveTo(x+rad, y);
+        ctx.arcTo(x+w, y, x+w, y+h, rad);
+        ctx.arcTo(x+w, y+h, x, y+h, rad);
+        ctx.arcTo(x, y+h, x, y, rad);
+        ctx.arcTo(x, y, x+w, y, rad);
+        ctx.closePath();
+      };
+
+      ctx.fillStyle = "rgba(33,212,253,0.12)";
+      ctx.strokeStyle = "rgba(120,170,255,0.35)";
+      rr(pad, y - 24, W - pad * 2, 40, 14);
+      ctx.fill();
+      ctx.stroke();
+
+        ctx.fillStyle = "#eaf6ff";
+        ctx.font = "700 16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        ctx.fillText(title, pad + 14, y);
+
+        ctx.fillStyle = "#9bb7df";
+        ctx.font = "600 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        const segDur = toMMSS(s.dur);
+        const rightTxt = `${toMMSS(s.start)} → ${toMMSS(s.end)}  •  ${segDur}`;
+        const wRight = ctx.measureText(rightTxt).width;
+        ctx.fillText(rightTxt, W - pad - wRight - 10, y);
+
+        y += 34;
+
+        drawBlockTitle("Damage (top)", col1, y);
+        drawBlockTitle("Healing (top)", col2, y);
+        drawBlockTitle("APM (top)", col3, y);
+
+        y += 22;
+
+        const maxSegDmg = Math.max(0, ...s.dmgTop.map((v) => v[1] || 0));
+        const maxSegHeal = Math.max(0, ...s.healTop.map((v) => v[1] || 0));
+        const maxSegApm = Math.max(0, ...s.apmTop.map((v) => v[1] || 0));
+
+        for (let r = 0; r < 5; r++) {
+          const d = s.dmgTop[r];
+          const h = s.healTop[r];
+          const a = s.apmTop[r];
+
+          if (d) drawRowBar(d[0], d[1], col1, y, maxSegDmg);
+          if (h) drawRowBar(h[0], h[1], col2, y, maxSegHeal);
+          if (a) drawRowBar(a[0], a[1], col3, y, maxSegApm, (v) => String(Math.round(v)));
+
+          y += line;
+        }
+
+        y += 24;
+      });
+
+      if (extraSegs) {
+        ctx.fillStyle = "#9bb7df";
+        ctx.font = "600 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        ctx.fillText(`…and ${extraSegs} more segments (export shows first ${MAX_SEGS}).`, pad, y);
+        y += 26;
+      }
+
+      const tEnd = performance.now();
+      const genMs = Math.round(tEnd - tStart);
+
+      // footer
+      ctx.fillStyle = "rgba(121,199,255,0.22)";
+      ctx.fillRect(pad, H - 54, W - pad * 2, 1);
+      ctx.fillStyle = "#9bb7df";
+      ctx.font = "500 12px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.fillText(`Generated in ${genMs} ms • Paste anywhere (Discord, forums, etc.)`, pad, H - 28);
+
+      exportBlob = await new Promise((resolve, reject) => {
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Failed to encode image"))), "image/png", 1);
+      });
+
+      
+      // Cache for next click (lets clipboard copy happen immediately with user gesture)
+      const exportKeyBuilt = `${lastParsedTextRef.current.length}|${rows?.length ?? 0}|${segments?.length ?? 0}|${psSelectedPlayers.join(",")}|${mode}`;
+      exportBlobRef.current = exportBlob;
+      exportBlobKeyRef.current = exportKeyBuilt;
+
+      const ClipboardItemAny = (window as any).ClipboardItem;
+      if (!navigator.clipboard || !ClipboardItemAny) {
+        throw new Error("Clipboard image copy not supported in this browser/context.");
+      }
+
+      if (!exportBlob) throw new Error("Failed to encode image.");
+
+      await navigator.clipboard.write([new ClipboardItemAny({ "image/png": exportBlob })]);
+
+      setExportToast("Copied! Paste it anywhere.");
+      setTimeout(() => setExportToast(null), 2500);
+    } catch (e: any) {
+      console.error(e);
+      const msg = (e && (e.name || e.message)) ? String(e.name || e.message) : "";
+      const denied = /NotAllowedError/i.test(msg) || /permission denied/i.test(msg) || /Write permission denied/i.test(msg);
+      if (denied && exportBlob) {
+        // Fallback: download the PNG instead of copying (image clipboard write is permission-gated in browsers).
+        try {
+          const url = URL.createObjectURL(exportBlob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `parsing-export-${Date.now()}.png`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 5000);
+          setExportToast("Clipboard blocked by browser — downloaded PNG instead.");
+          setTimeout(() => setExportToast(null), 4000);
+          return;
+        } catch (dlErr) {
+          // fall through to normal error toast
+        }
+      }
+
+      setExportToast(e?.message ? `Export failed: ${e.message}` : "Export failed.");
+      setTimeout(() => setExportToast(null), 4000);
+    } finally {
+      setExporting(false);
+    }
+  }, [exporting, segments, damageEvents, healEvents, utilityEvents, duration, debug, baseRows]);
+
 
   const [hoverX, setHoverX] = useState<number | null>(null);
 
@@ -1915,39 +3781,190 @@ w.onmessage = (ev:any)=>{
           damageEvents, healEvents, utilityEvents, deathEvents
         , actors: actorsFromWorker} = msg.payload;
 
-        const { pa: basePaNorm, pat: basePatNorm } =
-          mergeNormalizedAbilities(perAbility || {}, pat || {});
+        // --- Canonicalize actor names to avoid split identities like "Minerva" vs "Minerva'" ---
+        // Base canonicalization: strip token-terminal apostrophes ("Name'" / "Name' Testing" => "Name" / "Name Testing").
+        const canonActorBase = (n?: string) => stripTrailingApostrophe(String(n || '').trim());
 
-        setBaseRows(rws); setBaseTimeline(tl);
-        setBasePerSrc(perSrc||{});
+        // Merge PlayerRow[] by canonical actor name
+        const mergedRows: PlayerRow[] = (() => {
+          const by = new Map<string, PlayerRow>();
+          for (const r of (rws || [])) {
+            const can = canonActorBase(r?.name);
+            if (!can) continue;
+            const cur = by.get(can);
+            if (!cur) {
+              by.set(can, { ...r, name: can });
+            } else {
+              cur.damageDealt += Number(r.damageDealt || 0);
+              cur.healingDone += Number(r.healingDone || 0);
+              // prefer a real profession if one exists
+              if (!cur.profession && r.profession) cur.profession = r.profession;
+            }
+          }
+          // recompute avgDps from merged damage if possible
+          const dur = Number(duration || 0);
+          for (const v of by.values()) {
+            v.avgDps = dur > 0 ? (v.damageDealt / dur) : Number(v.avgDps || 0);
+          }
+          return Array.from(by.values());
+        })();
+
+        // Secondary canonicalization:
+        // Some logs include suffixes like "Testing" for the same character (e.g. "Minerva' Testing").
+        // If stripping the suffix matches a known merged player name, collapse to that base name.
+        const mergedNameSet = new Set<string>(mergedRows.map(r => String(r.name || '').trim()).filter(Boolean));
+        const canonActor = (n?: string) => {
+          const base = canonActorBase(n);
+          if (!base) return '';
+          const maybe = base.replace(/\s+testing\s*$/i, '').trim();
+          return (maybe && maybe !== base && mergedNameSet.has(maybe)) ? maybe : base;
+        };
+
+        const mergeNumArray = (a: number[] | undefined, b: number[] | undefined) => {
+          const A = a || [];
+          const B = b || [];
+          const n = Math.max(A.length, B.length);
+          const out = new Array(n).fill(0);
+          for (let i = 0; i < n; i++) out[i] = (A[i] || 0) + (B[i] || 0);
+          return out;
+        };
+
+        const mergedPerSrc: Record<string, number[]> = (() => {
+          const out: Record<string, number[]> = {};
+          for (const [k, arr] of Object.entries(perSrc || {})) {
+            const can = canonActor(k);
+            if (!can) continue;
+            out[can] = mergeNumArray(out[can], arr);
+          }
+          return out;
+        })();
+
+        const mergedPerTaken: Record<string, number> = (() => {
+          const out: Record<string, number> = {};
+          for (const [k, v] of Object.entries(perTaken || {})) {
+            const can = canonActor(k);
+            if (!can) continue;
+            out[can] = (out[can] || 0) + Number(v || 0);
+          }
+          return out;
+        })();
+
+        const mergedPerTakenBy: Record<string, Record<string, number>> = (() => {
+          const out: Record<string, Record<string, number>> = {};
+          for (const [victim, by] of Object.entries(perTakenBy || {})) {
+            const vCan = canonActor(victim);
+            if (!vCan) continue;
+            if (!out[vCan]) out[vCan] = {};
+            for (const [src, amt] of Object.entries(by || {})) {
+              const sCan = canonActor(src);
+              if (!sCan) continue;
+              out[vCan][sCan] = (out[vCan][sCan] || 0) + Number(amt || 0);
+            }
+          }
+          return out;
+        })();
+
+        const mergedPerAbilityRaw: PerAbility = (() => {
+          const out: PerAbility = {};
+          for (const [actor, abilMap] of Object.entries(perAbility || {})) {
+            const aCan = canonActor(actor);
+            if (!aCan) continue;
+            if (!out[aCan]) out[aCan] = {};
+            for (const [abil, stats] of Object.entries(abilMap || {})) {
+              const cur = out[aCan][abil] || { hits: 0, dmg: 0, max: 0 };
+              cur.hits += Number((stats as any)?.hits || 0);
+              cur.dmg  += Number((stats as any)?.dmg || 0);
+              cur.max   = Math.max(cur.max, Number((stats as any)?.max || 0));
+              out[aCan][abil] = cur;
+            }
+          }
+          return out;
+        })();
+
+        const mergedPerAbilityTargetsRaw: PerAbilityTargets = (() => {
+          const out: PerAbilityTargets = {};
+          for (const [actor, abilMap] of Object.entries(pat || {})) {
+            const aCan = canonActor(actor);
+            if (!aCan) continue;
+            if (!out[aCan]) out[aCan] = {};
+            for (const [abil, tgtMap] of Object.entries(abilMap || {})) {
+              if (!out[aCan][abil]) out[aCan][abil] = {};
+              for (const [tgt, stats] of Object.entries(tgtMap || {})) {
+                const tCan = canonActor(tgt);
+                if (!tCan) continue;
+                const cur = out[aCan][abil][tCan] || { hits: 0, dmg: 0, max: 0 };
+                cur.hits += Number((stats as any)?.hits || 0);
+                cur.dmg  += Number((stats as any)?.dmg || 0);
+                cur.max   = Math.max(cur.max, Number((stats as any)?.max || 0));
+                out[aCan][abil][tCan] = cur;
+              }
+            }
+          }
+          return out;
+        })();
+
+        const mergedDamageEvents: DFEvent[] = (damageEvents || []).map((e: any) => ({
+          ...e,
+          src: canonActor(e?.src),
+          dst: canonActor(e?.dst),
+          target: canonActor(e?.target),
+          victim: canonActor(e?.victim),
+          defender: canonActor(e?.defender),
+        }));
+
+        const mergedHealEvents: HealEvent[] = (healEvents || []).map((e: any) => ({
+          ...e,
+          src: canonActor(e?.src),
+          dst: canonActor(e?.dst),
+        }));
+
+        const mergedUtilityEvents: UtilityEvent[] = (utilityEvents || []).map((e: any) => ({
+          ...e,
+          src: canonActor(e?.src),
+        }));
+
+        const mergedDeathEvents = (deathEvents || []).map((e: any) => ({
+          ...e,
+          name: canonActor(e?.name),
+        }));
+
+        const mergedActors = Array.isArray(actorsFromWorker)
+          ? Array.from(new Set(actorsFromWorker.map((x: any) => canonActor(x)).filter(Boolean)))
+          : [];
+
+        const { pa: basePaNorm, pat: basePatNorm } =
+          mergeNormalizedAbilities(mergedPerAbilityRaw || {}, mergedPerAbilityTargetsRaw || {});
+
+        setBaseRows(mergedRows); setBaseTimeline(tl);
+        setBasePerSrc(mergedPerSrc||{});
         setBasePerAbility(basePaNorm);
         setBasePerAbilityTargets(basePatNorm);
-        setBasePerTaken(perTaken||{});
-        setBasePerTakenBy(perTakenBy||{});
-        setDamageEvents(damageEvents||[]);
-        setHealEvents(healEvents||[]);
+        setBasePerTaken(mergedPerTaken||{});
+        setBasePerTakenBy(mergedPerTakenBy||{});
+        setDamageEvents(mergedDamageEvents||[]);
+        setHealEvents(mergedHealEvents||[]);
         const utilFromWorker = utilityEvents || [];
         const utilFallback = (!utilFromWorker.length && lastParsedTextRef.current)
           ? extractUtilityEventsFromPerforms(lastParsedTextRef.current)
           : utilFromWorker;
-        setUtilityEvents(utilFallback);
-        setDeathEvents(deathEvents||[]);
+        setUtilityEvents(mergedUtilityEvents.length ? mergedUtilityEvents : utilFallback.map(e => ({ ...e, src: canonActor((e as any)?.src) })));
+        setDeathEvents(mergedDeathEvents||[]);
         setDuration(duration||0);
         setDebug(debug);
-        setActorsSeen(Array.isArray(actorsFromWorker) ? actorsFromWorker : []);
+        setActorsSeen(mergedActors);
 
-        const segs = deriveSegments(tl, damageEvents||[], idleGap);
+        const segs = deriveSegments(tl, mergedDamageEvents||[], idleGap);
         setSegments(segs);
         setSegIndex(-1);
 
         const start = tl?.[0]?.t ?? 0;
         const end   = tl?.length ? tl[tl.length-1].t : duration;
         applyWindow({ start, end }, {
-          tl, rows:rws, perSrc, perAbility: basePaNorm, pat: basePatNorm, perTaken, perTakenBy, duration
+          tl, rows: mergedRows, perSrc: mergedPerSrc, perAbility: basePaNorm, pat: basePatNorm, perTaken: mergedPerTaken, perTakenBy: mergedPerTakenBy, duration
         });
 
-        setPA(a=> rws.find(v=>v.name===a)?.name || '');
-        setPB(b=> rws.find(v=>v.name===b)?.name || '');
+        setPA(a=> mergedRows.find(v=>v.name===canonActor(a))?.name || '');
+        setPB(b=> mergedRows.find(v=>v.name===canonActor(b))?.name || '');
 
         setParsing(null);
       
@@ -1968,6 +3985,7 @@ w.onmessage = (ev:any)=>{
   async function parseTextViaWorker(text:string){
     const w = await ensureWorker();
     setParsing({done:0,total:1});
+    setExportReady(false);
     lastParsedTextRef.current = text;
     try {
       // Send both legacy and typed shapes so either worker impl will parse it
@@ -2072,14 +4090,19 @@ w.onmessage = (ev:any)=>{
 
 // --- Dynamic player aliasing (merge short vs full names safely) ---
 // Generic first words we should never use for aliasing (NPC phrases)
+// NOTE: use normName() so "Renn" and "Renn'" share the same key.
 const GENERIC_TOKENS = new Set(['a','an','the','with','using']);
 const LONGEST_BY_FIRST: Record<string,string> = {};
+const firstKey = (raw:string) => {
+  const first = (raw||'').trim().split(/\s+/)[0] || '';
+  return normName(first); // strips quotes/apostrophes/punct
+};
 const learn = (n?:string) => {
   const raw = String(n||'').trim(); if (!raw) return;
-  const ft = raw.split(/\s+/)[0]?.toLowerCase() || '';
-  if (!ft || GENERIC_TOKENS.has(ft)) return;
-  const cur = LONGEST_BY_FIRST[ft];
-  if (!cur || raw.length > cur.length) LONGEST_BY_FIRST[ft] = raw;
+  const fk = firstKey(raw);
+  if (!fk || GENERIC_TOKENS.has(fk)) return;
+  const cur = LONGEST_BY_FIRST[fk];
+  if (!cur || raw.length > cur.length) LONGEST_BY_FIRST[fk] = raw;
 };
 dE.forEach(e => learn(e.src));
 hE.forEach(e => learn(e.src));
@@ -2087,9 +4110,9 @@ hE.forEach(e => learn(e.src));
 
 const canonDyn = (n:string) => {
   const raw = String(n||'').trim();
-  const ft = raw.split(/\s+/)[0]?.toLowerCase() || '';
-  if (!ft || GENERIC_TOKENS.has(ft)) return raw;
-  return LONGEST_BY_FIRST[ft] || raw;
+  const fk = firstKey(raw);
+  if (!fk || GENERIC_TOKENS.has(fk)) return normalizeActorName(raw);
+  return normalizeActorName(LONGEST_BY_FIRST[fk] || raw);
 };
 // rows (canonicalized)
     const dmgBySrc: Record<string, number> = {};
@@ -2204,7 +4227,8 @@ const canonDyn = (n:string) => {
     const bad  = /^(with|using)\s/i;
     const keep = /^(Element of\s+(Acid|Cold|Electricity|Heat))$/i;
 
-    const clean = (s: string) => (s || '')
+    // Also strip common trailing apostrophe variants (logs sometimes emit "Name'" as the same actor)
+    const clean = (s: string) => stripTrailingApostrophe((s || '').normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g,''))
       .replace(/\s+and\s.+$/i,'')
       .replace(/\([^\)]*\)/g,'')
       .replace(/\s{2,}/g,' ')
@@ -2234,20 +4258,95 @@ const canonDyn = (n:string) => {
       if (prefUpper || longer) pick.set(k, n);
     }
 
-    return Array.from(pick.values()).sort((a,b)=> a.localeCompare(b, undefined, {sensitivity:'base'}));
+        // If the log sometimes emits a short player name ("Renn") and other times a full name ("Renn Kaizer"),
+    // prefer the full name when it is an unambiguous extension of the short name.
+    const vals = Array.from(pick.values());
+
+    const normFirst = (s: string) => normName(clean(s).split(/\s+/)[0] || '');
+    const byFirst: Record<string, string[]> = {};
+    for (const v of vals) {
+      const k = normFirst(v);
+      if (!k) continue;
+      (byFirst[k] ||= []).push(v);
+    }
+
+    const final: string[] = [];
+    const dropped = new Set<string>();
+    for (const v of vals) {
+      if (dropped.has(v)) continue;
+      const parts = clean(v).split(/\s+/).filter(Boolean);
+      if (parts.length === 1) {
+        const k = normFirst(v);
+        const cands = (byFirst[k] || []).filter(x =>
+          clean(x).length > clean(v).length &&
+          clean(x).toLowerCase().startsWith(clean(v).toLowerCase() + ' ')
+        );
+        // Only merge when there is exactly one longer candidate.
+        if (cands.length === 1) {
+          dropped.add(v);
+          continue;
+        }
+      }
+      final.push(v);
+    }
+
+    // Ensure the preferred longest name exists for any dropped short key.
+    for (const arr2 of Object.values(byFirst)) {
+      const longest = arr2.slice().sort((a,b)=> clean(b).length - clean(a).length)[0];
+      const hadDroppedShort = arr2.some(x => dropped.has(x));
+      if (hadDroppedShort && longest && !final.includes(longest)) final.push(longest);
+    }
+
+    return final.sort((a,b)=> a.localeCompare(b, undefined, {sensitivity:'base'}));
   }, [rows, perTaken, actorsSeen]);
-const listDamage = useMemo(()=> barData(rows, metric), [rows, metric]);
-(()=> barData(rows, metric), [rows, metric]);
+
+  const listDamage = useMemo(()=> barData(rows, metric), [rows, metric]);
   const listHealing = useMemo(()=> barData(rows, 'healingDone'), [rows]);
   const inferredClasses = useMemo(()=> inferClasses(rows, perAbility), [rows, perAbility]);
+
+
+  // Keep refs so async export waits always see latest inferred/profession maps (avoid stale closures).
+  const inferredClassesRef = useRef<Record<string, string>>({});
+  const professionByCanonRef = useRef<Record<string, string>>({});
+
+  useEffect(() => { inferredClassesRef.current = inferredClasses || {}; }, [inferredClasses]);
+  useEffect(() => {
+    // Build a resilient profession lookup for async export color readiness checks.
+    // We include both raw and canonicalized names to survive apostrophes/variants.
+    const src = inferredClasses || ({} as Record<string, string>);
+    const out: Record<string, string> = {};
+    for (const [rawName, prof] of Object.entries(src)) {
+      if (!rawName || !prof) continue;
+      out[rawName] = prof;
+      try {
+        const canon = canonEntity(rawName);
+        out[canon] = prof;
+      } catch {
+        // ignore
+      }
+    }
+    professionByCanonRef.current = out;
+  }, [inferredClasses]);
+
+  // Mark export as ready once we have a finished parse + computed class inference.
+  // Use rAF to ensure React has committed the render containing inferredClasses.
+  useEffect(() => {
+    if (parsing) return;
+    if (!segments?.length) return;
+    if (!rows?.length) return;
+    const hasAny = inferredClasses && Object.keys(inferredClasses).length > 0;
+    if (!hasAny) return;
+    const id = requestAnimationFrame(() => setExportReady(true));
+    return () => cancelAnimationFrame(id);
+  }, [parsing, segments, rows, inferredClasses]);
 
 // PlayerSummary expects Player objects (name + optional profession). Build it from parsed events, then attach inferred class.
 const playersForSummary = useMemo(() => {
   const set = new Set<string>();
-  for (const e of damageEvents) if (e?.src) set.add(e.src);
-  for (const e of healEvents) if (e?.src) set.add(e.src);
-  for (const e of utilityEvents) if (e?.src) set.add(e.src);
-  for (const d of deathEvents) if (d?.name) set.add(d.name);
+  for (const e of damageEvents) if (e?.src) set.add(normalizeActorName(e.src));
+  for (const e of healEvents) if (e?.src) set.add(normalizeActorName(e.src));
+  for (const e of utilityEvents) if (e?.src) set.add(normalizeActorName(e.src));
+  for (const d of deathEvents) if (d?.name) set.add(normalizeActorName(d.name));
 
   return Array.from(set)
     .filter(Boolean)
@@ -2263,7 +4362,442 @@ const playersForSummary = useMemo(() => {
       .filter(r => ALLOWED_CLASSES.has(String(inferredClasses[r.name]).toLowerCase()))
       .map(r => r.name)
   ), [rows, inferredClasses, ALLOWED_CLASSES]);
-  const listAPM = useMemo(() => actionsPerMinute(perSrc, timeline, duration), [perSrc, timeline, duration, segIndex, segments]);
+// APM should ignore travel/idle downtime between segments; use derived segments as the active-time denominator.
+  // IMPORTANT: For APM we count "activity seconds" (button-press-like activity), not raw event lines.
+  // We include: damage seconds (perSrc) + utility seconds ("performs X" utilityEvents). We explicitly do NOT include heal tick lines.
+  const apmPerSecond = useMemo(() => {
+    const out: Record<string, number[]> = {};
+    const winStart = timeline.length ? timeline[0].t : 0;
+    const winEnd = timeline.length ? timeline[timeline.length - 1].t : duration;
+
+    // Damage activity (per second)
+    for (const [actor, series] of Object.entries(perSrc || {})) {
+      const s = series || [];
+      const act = canonDyn(actor);
+      if (!act) continue;
+      if (!out[act]) out[act] = [];
+      for (let t = winStart; t <= winEnd; t++) {
+        if ((s[t] || 0) > 0) out[act][t] = 1;
+      }
+    }
+
+    // Utility activity ("performs ...")
+    for (const ev of utilityEvents || []) {
+      const actorRaw = String(ev?.src || "").trim();
+      const actor = canonDyn(actorRaw);
+      if (!actor) continue;
+      const t = (ev?.t ?? -1) | 0;
+      if (t < winStart || t > winEnd) continue;
+      if (!out[actor]) out[actor] = [];
+      out[actor][t] = 1;
+    }
+
+    return out;
+  }, [perSrc, utilityEvents, timeline, duration]);
+
+  const listAPM = useMemo(
+    () => actionsPerMinute(apmPerSecond, timeline, duration, segments),
+    [apmPerSecond, timeline, duration, segments]
+  );
+
+  // Build a per-player explanation map so the Sources APM panel can show "why" a player is higher.
+  const apmBreakdownByPlayer = useMemo(() => {
+    const winStart = timeline.length ? timeline[0].t : 0;
+    const winEnd = timeline.length ? timeline[timeline.length - 1].t : duration;
+    const maxT = Math.max(duration, winEnd);
+
+    // active mask (segments ∩ window)
+    const active = new Uint8Array(maxT + 1);
+    if (!segments || !segments.length) {
+      for (let t = winStart; t <= winEnd && t <= maxT; t++) active[t] = 1;
+    } else {
+      for (const seg of segments) {
+        const a = Math.max(winStart, seg.start);
+        const b = Math.min(winEnd, seg.end);
+        for (let t = a; t <= b && t <= maxT; t++) active[t] = 1;
+      }
+    }
+    let activeSeconds = 0;
+    for (let t = winStart; t <= winEnd && t <= maxT; t++) if (active[t]) activeSeconds++;
+    activeSeconds = Math.max(1, activeSeconds);
+    const minutes = Math.max(1, activeSeconds / 60);
+
+    // precompute util seconds per player
+    const utilSec: Record<string, Uint8Array> = {};
+    for (const ev of utilityEvents || []) {
+      const actorRaw = String(ev?.src || "").trim();
+      const actor = canonDyn(actorRaw);
+      if (!actor) continue;
+      const t = (ev?.t ?? -1) | 0;
+      if (t < winStart || t > winEnd || t > maxT) continue;
+      if (!utilSec[actor]) utilSec[actor] = new Uint8Array(maxT + 1);
+      utilSec[actor][t] = 1;
+    }
+
+    // precompute damage seconds per player
+    const dmgSec: Record<string, Uint8Array> = {};
+    for (const [actorRaw, series] of Object.entries(perSrc || {})) {
+      const s = series || [];
+      const actor = canonDyn(actorRaw);
+      if (!actor) continue;
+      const arr = new Uint8Array(maxT + 1);
+      for (let t = winStart; t <= winEnd && t <= maxT; t++) {
+        if ((s[t] || 0) > 0) arr[t] = 1;
+      }
+      // merge if multiple aliases map to same canonical
+      if (dmgSec[actor]) {
+        const cur = dmgSec[actor];
+        for (let t = winStart; t <= winEnd && t <= maxT; t++) if (arr[t]) cur[t] = 1;
+      } else {
+        dmgSec[actor] = arr;
+      }
+    }
+
+    // top abilities by "activations" (dedup per (actor, second, ability))
+    const dmgActs: Record<string, Record<string, number>> = {};
+    const dmgSeen = new Set<string>();
+    for (const e of damageEvents || []) {
+      const actorRaw = String(e?.src || "").trim();
+      const actor = canonDyn(actorRaw);
+      const t = (e?.t ?? -1) | 0;
+      if (!actor || t < winStart || t > winEnd || t > maxT) continue;
+      if (!active[t]) continue;
+      const abil = normalizeAbilityName(String(e?.ability || "Unknown"));
+      const key = actor + "|" + t + "|" + abil;
+      if (dmgSeen.has(key)) continue;
+      dmgSeen.add(key);
+      dmgActs[actor] = dmgActs[actor] || {};
+      dmgActs[actor][abil] = (dmgActs[actor][abil] || 0) + 1;
+    }
+
+    const utilActs: Record<string, Record<string, number>> = {};
+    const utilSeen = new Set<string>();
+    for (const e of utilityEvents || []) {
+      const actorRaw = String(e?.src || "").trim();
+      const actor = canonDyn(actorRaw);
+      const t = (e?.t ?? -1) | 0;
+      if (!actor || t < winStart || t > winEnd || t > maxT) continue;
+      if (!active[t]) continue;
+      const abil = normalizeAbilityName(String(e?.ability || "Unknown"));
+      const key = actor + "|" + t + "|" + abil;
+      if (utilSeen.has(key)) continue;
+      utilSeen.add(key);
+      utilActs[actor] = utilActs[actor] || {};
+      utilActs[actor][abil] = (utilActs[actor][abil] || 0) + 1;
+    }
+
+    const out: Record<string, any> = {};
+    const allPlayers = new Set<string>([
+      ...Object.keys(apmPerSecond || {}),
+      ...Object.keys(dmgSec || {}),
+      ...Object.keys(utilSec || {}),
+    ]);
+
+    // Compute per *canonical* actor key, then expose under any alias key present in the window.
+    const computedByCanon: Record<string, any> = {};
+
+    for (const name of allPlayers) {
+      const canon = canonDyn(name);
+      if (!canon) continue;
+
+      if (!computedByCanon[canon]) {
+        const dArr = dmgSec[canon] || new Uint8Array(maxT + 1);
+        const uArr = utilSec[canon] || new Uint8Array(maxT + 1);
+      let dmgSeconds = 0, utilSeconds = 0, overlap = 0, actionSeconds = 0;
+      for (let t = winStart; t <= winEnd && t <= maxT; t++) {
+        if (!active[t]) continue;
+        const d = dArr[t] ? 1 : 0;
+        const u = uArr[t] ? 1 : 0;
+        if (d) dmgSeconds++;
+        if (u) utilSeconds++;
+        if (d && u) overlap++;
+        if (d || u) actionSeconds++;
+      }
+      const apm = actionSeconds / minutes;
+
+      let topDamage = Object.entries(dmgActs[canon] || {})
+        .sort((a, b) => (b[1] as number) - (a[1] as number))
+        .slice(0, 5)
+        .map(([ability, count]) => ({ ability, count }));
+
+      // Fallback: some logs only emit reliable ability names in the aggregated perAbility table
+      // (e.g. many damageEvents lines collapse to "periodic"). If we only see "periodic"
+      // here, show top abilities by hits so users still get a useful breakdown.
+      let topDamageMode: 'activations' | 'hits' = 'activations';
+      const onlyPeriodic = (topDamage.length <= 1) && (topDamage[0]?.ability === 'periodic' || topDamage[0]?.ability === '' || topDamage[0]?.ability === 'unknown');
+      if (onlyPeriodic) {
+        const abilMap = (perAbility as any)?.[canon] || (perAbility as any)?.[name] || {};
+        const alt = Object.entries(abilMap)
+          .map(([ability, stats]: any) => ({ ability: String(ability), count: Number(stats?.hits || 0) }))
+          .filter(x => x.ability && x.count > 0)
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 5);
+        if (alt.length) {
+          topDamage = alt;
+          topDamageMode = 'hits';
+        }
+      }
+      const topUtility = Object.entries(utilActs[canon] || {})
+        .sort((a, b) => (b[1] as number) - (a[1] as number))
+        .slice(0, 5)
+        .map(([ability, count]) => ({ ability, count }));
+
+        computedByCanon[canon] = {
+        winStart,
+        winEnd,
+        activeSeconds,
+        minutes,
+        apm: Math.round(apm),
+        dmgSeconds,
+        utilSeconds,
+        overlap,
+        actionSeconds,
+        topDamage,
+        topDamageMode,
+        topUtility,
+        };
+      }
+
+      // Expose under both the alias key and the canonical key so tooltips work
+      // even if charts/dropdowns use a shorter variant.
+      out[name] = computedByCanon[canon];
+      out[canon] = computedByCanon[canon];
+    }
+    return out;
+  }, [apmPerSecond, perSrc, utilityEvents, damageEvents, timeline, duration, segments, perAbility]);
+
+  
+
+const healingBreakdownByPlayer = useMemo(() => {
+  const out: Record<string, any> = {};
+  const totalsByCanon: Record<string, number> = {};
+  const perSecondByCanon: Record<string, Record<number, number>> = {};
+  const castsByCanon: Record<string, Set<string>> = {};
+  const topTargetsByCanon: Record<string, Record<string, number>> = {};
+  const topAbilitiesByCanon: Record<string, Record<string, number>> = {};
+  const largestByCanon: Record<string, number> = {};
+
+  const wStart = windowStart ?? 0;
+  const wEnd = windowEnd ?? duration;
+
+  for (const ev of (healEvents || [])) {
+    const t = Number(ev?.t ?? 0);
+    if (t < wStart || t > wEnd) continue;
+
+    const src = canonDyn(String(ev?.src || "").trim());
+    if (!src) continue;
+
+    const dst = canonDyn(String(ev?.dst || "").trim()) || String(ev?.dst || "").trim() || "(Unknown)";
+    const abilityRaw = String(ev?.ability || "").trim();
+    const ability = normalizeAbilityKey(abilityRaw) || abilityRaw || "(Unknown)";
+    const amt = Number(ev?.amount ?? 0);
+    if (!Number.isFinite(amt) || amt <= 0) continue; // ignore 0/neg heals for now
+
+    totalsByCanon[src] = (totalsByCanon[src] || 0) + amt;
+
+    if (!perSecondByCanon[src]) perSecondByCanon[src] = {};
+    perSecondByCanon[src][t] = (perSecondByCanon[src][t] || 0) + amt;
+
+    if (!castsByCanon[src]) castsByCanon[src] = new Set();
+    // Casts are deduped by (second, ability) to avoid inflating multi-target/tick healing
+    castsByCanon[src].add(`${t}|${ability}`);
+
+    if (!topTargetsByCanon[src]) topTargetsByCanon[src] = {};
+    topTargetsByCanon[src][dst] = (topTargetsByCanon[src][dst] || 0) + amt;
+
+    if (!topAbilitiesByCanon[src]) topAbilitiesByCanon[src] = {};
+    topAbilitiesByCanon[src][ability] = (topAbilitiesByCanon[src][ability] || 0) + amt;
+
+    largestByCanon[src] = Math.max(largestByCanon[src] || 0, amt);
+  }
+
+  for (const [canon, total] of Object.entries(totalsByCanon)) {
+    const perSec = perSecondByCanon[canon] || {};
+    const activeSeconds = Object.values(perSec).filter(v => (v || 0) > 0).length;
+    const burstiest1s = Math.max(0, ...Object.values(perSec));
+    const casts = castsByCanon[canon]?.size || 0;
+
+    const topTargets = Object.entries(topTargetsByCanon[canon] || {})
+      .sort((a,b)=>b[1]-a[1]).slice(0,5)
+      .map(([name, v]) => ({ name, v }));
+    const topAbilities = Object.entries(topAbilitiesByCanon[canon] || {})
+      .sort((a,b)=>b[1]-a[1]).slice(0,5)
+      .map(([name, v]) => ({ name, v }));
+
+    out[canon] = {
+      total,
+      casts,
+      activeSeconds,
+      hpsActive: activeSeconds ? total / activeSeconds : 0,
+      burstiest1s,
+      largest: largestByCanon[canon] || 0,
+      topTargets,
+      topAbilities,
+      wStart,
+      wEnd,
+    };
+  }
+
+  return out;
+}, [healEvents, windowStart, windowEnd, duration, segments, timeline]);
+
+const healingTooltipContent = useCallback((tp: any) => {
+  if (!tp?.active) return null;
+  const payload = tp?.payload || [];
+  const name = payload?.[0]?.payload?.name || tp?.label;
+  const canon = canonDyn(String(name || "").trim()) || String(name || "").trim();
+  const info = healingBreakdownByPlayer?.[canon] || healingBreakdownByPlayer?.[String(name || "")];
+
+  const tFmt = (s:number)=>{
+    const m = Math.floor((s||0)/60);
+    const ss = String(Math.max(0,(s||0)%60)).padStart(2,'0');
+    return `${m}:${ss}`;
+  };
+  const fmt0Local = (n:number)=> (Number.isFinite(n) ? Math.round(n).toLocaleString() : "0");
+
+  if (!info) {
+    return (
+      <SmartTooltipBox depKey={`heal:${String(name||"")}`} cardId={`${mode}:Healing Done`}>
+      <div style={{ background:"rgba(9,14,24,.96)", border:"1px solid rgba(120,170,255,.35)", padding:16, borderRadius:14, color:"#cfe3ff", width:560, boxShadow:"0 18px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(98,176,255,.12) inset" }}>
+        <div style={{ fontWeight:800 }}>{String(name||"")}</div>
+        <div style={{ opacity:.8, fontSize:12, marginTop:6 }}>No healing breakdown available for this player in the current window.</div>
+      </div>
+      </SmartTooltipBox>
+    );
+  }
+
+  const line = (label:string, value:any) => (
+    <div style={{ display:"flex", justifyContent:"space-between", gap:12, fontSize:12, marginTop:4 }}>
+      <div style={{ opacity:.85 }}>{label}</div>
+      <div style={{ fontWeight:700 }}>{value}</div>
+    </div>
+  );
+
+  return (
+    <SmartTooltipBox depKey={`heal:${String(name||"")}:${info.total}:${info.casts}`} cardId={`${mode}:Healing Done`}>
+    <div style={{ background:"rgba(9,14,24,.96)", border:"1px solid rgba(120,170,255,.35)", padding:18, borderRadius:16, color:"#cfe3ff", width:640, boxShadow:"0 18px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(98,176,255,.12) inset" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", gap:10 }}>
+        <div style={{ fontSize:26, fontWeight:900, letterSpacing:.2 }}>{String(name||"")}</div>
+        <div style={{ fontSize:18, fontWeight:800, color:"#d9ecff" }}>HPS {Number(info.total / Math.max(1,(info.wEnd-info.wStart)||duration||1)).toFixed(1)}</div>
+      </div>
+      <div style={{ opacity:.8, fontSize:12, marginTop:4 }}>
+        Window {tFmt(info.wStart)}–{tFmt(info.wEnd)} • {(((info.wEnd-info.wStart)||0)/60).toFixed(1)} min
+      </div>
+
+      <div style={{ marginTop:12, display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+        <div>
+          {line("Total healing", fmt0Local(info.total))}
+          {line("Healing casts (est.)", fmt0Local(info.casts))}
+          {line("Active healing seconds", fmt0Local(info.activeSeconds))}
+          {line("HPS during active", info.hpsActive ? info.hpsActive.toFixed(1) : "0.0")}
+          {line("Burstiest 1s (total)", fmt0Local(info.burstiest1s))}
+          {line("Largest single heal", fmt0Local(info.largest))}
+        </div>
+
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+          <div>
+            <div style={{ fontSize:13, fontWeight:900, opacity:.9, marginBottom:6 }}>Top targets healed</div>
+            {(info.topTargets || []).map((r:any)=>(
+              <div key={r.name} style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginTop:4 }}>
+                <div style={{ opacity:.9 }}>{r.name}</div>
+                <div style={{ fontWeight:800 }}>{fmt0Local(r.v)}</div>
+              </div>
+            ))}
+          </div>
+          <div>
+            <div style={{ fontSize:13, fontWeight:900, opacity:.9, marginBottom:6 }}>Top healing abilities</div>
+            {(info.topAbilities || []).map((r:any)=>(
+              <div key={r.name} style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginTop:4 }}>
+                <div style={{ opacity:.9 }}>{r.name}</div>
+                <div style={{ fontWeight:800 }}>{fmt0Local(r.v)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ opacity:.65, fontSize:11, marginTop:10 }}>
+        Note: “Casts” are deduped by (second, ability) to avoid inflating multi-target/tick healing.
+      </div>
+    </div>
+  </SmartTooltipBox>
+  );
+}, [healingBreakdownByPlayer, windowStart, windowEnd, duration, mode]);
+
+const apmTooltipContent = useCallback((tp: any) => {
+    if (!tp?.active) return null;
+    const payload = tp?.payload || [];
+    const name = payload?.[0]?.payload?.name || tp?.label;
+    const info = apmBreakdownByPlayer?.[name];
+    if (!info) return (
+      <SmartTooltipBox depKey={`apm:${String(name||"")}`} cardId={`${mode}:APM`}>
+      <div style={{ background:"rgba(9,14,24,.96)", border:"1px solid rgba(120,170,255,.35)", padding:16, borderRadius:14, color:"#cfe3ff", width:560, boxShadow:"0 18px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(98,176,255,.12) inset" }}>
+        <div style={{ fontWeight:800 }}>{String(name||"")}</div>
+        <div style={{ opacity:.8, fontSize:12, marginTop:6 }}>No APM breakdown available for this player in the current window.</div>
+      </div>
+      </SmartTooltipBox>
+    );
+
+    const tFmt = (s:number)=>{
+      const m = Math.floor((s||0)/60);
+      const ss = String(Math.max(0,(s||0)%60)).padStart(2,'0');
+      return `${m}:${ss}`;
+    };
+
+    const line = (label:string, value:any) => (
+      <div style={{ display:"flex", justifyContent:"space-between", gap:12, fontSize:12, marginTop:4 }}>
+        <div style={{ opacity:.85 }}>{label}</div>
+        <div style={{ fontWeight:700 }}>{value}</div>
+      </div>
+    );
+
+    return (
+      <SmartTooltipBox depKey={`apm:${String(name||"")}:${info.apm}:${info.activeSeconds}`} cardId={`${mode}:APM`}>
+      <div style={{ background:"rgba(9,14,24,.96)", border:"1px solid rgba(120,170,255,.35)", padding:16, borderRadius:14, color:"#cfe3ff", width:720, boxShadow:"0 18px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(98,176,255,.12) inset" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", gap:10 }}>
+          <div style={{ fontWeight:900 }}>{String(name||"")}</div>
+          <div style={{ fontWeight:900 }}>APM {info.apm}</div>
+        </div>
+        <div style={{ opacity:.8, fontSize:12, marginTop:4 }}>
+          Window {tFmt(info.winStart)}–{tFmt(info.winEnd)} • Active {fmt1(info.activeSeconds/60)} min
+        </div>
+        <div style={{ marginTop:8 }}>
+          {line("Action seconds (damage ∪ utility)", info.actionSeconds)}
+          {line("Damage seconds", info.dmgSeconds)}
+          {line("Utility seconds", info.utilSeconds)}
+          {line("Overlap seconds", info.overlap)}
+        </div>
+        {(info.topDamage?.length || info.topUtility?.length) ? (
+          <div style={{ marginTop:12, display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+            <div>
+              <div style={{ fontSize:12, fontWeight:800, opacity:.9, marginBottom:6 }}>
+                Top damage actions{info.topDamageMode === 'hits' ? ' (by hits)' : ''}
+              </div>
+              {(info.topDamage||[]).length ? (info.topDamage||[]).map((x:any)=>(
+                <div key={x.ability} style={{ display:"flex", justifyContent:"space-between", gap:10, fontSize:12, marginTop:4 }}>
+                  <div style={{ whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", maxWidth:160 }}>{x.ability}</div>
+                  <div style={{ fontWeight:800 }}>{x.count}</div>
+                </div>
+              )) : <div style={{ fontSize:12, opacity:.7 }}>None</div>}
+            </div>
+            <div>
+              <div style={{ fontSize:12, fontWeight:800, opacity:.9, marginBottom:6 }}>Top utility actions</div>
+              {(info.topUtility||[]).length ? (info.topUtility||[]).map((x:any)=>(
+                <div key={x.ability} style={{ display:"flex", justifyContent:"space-between", gap:10, fontSize:12, marginTop:4 }}>
+                  <div style={{ whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", maxWidth:160 }}>{x.ability}</div>
+                  <div style={{ fontWeight:800 }}>{x.count}</div>
+                </div>
+              )) : <div style={{ fontSize:12, opacity:.7 }}>None</div>}
+            </div>
+          </div>
+        ) : null}
+        <div style={{ marginTop:10, fontSize:11, opacity:.65 }}>
+          Note: APM counts at most 1 per second for a given player (activity-seconds), so AoE multi-target lines don’t inflate it.
+        </div>
+      </div>
+      </SmartTooltipBox>
+    );
+  }, [apmBreakdownByPlayer, mode]);
 
   const takenFor = useMemo(()=> {
     const who = (compareOn && (pA || pB)) ? (pA || pB) : '';
@@ -2273,6 +4807,348 @@ const playersForSummary = useMemo(() => {
     const items = Object.entries(perTaken).map(([name, value])=>({ name, value }));
     return items.sort((a,b)=> b.value - a.value).slice(0,12);
   }, [perTaken, perTakenBy, compareOn, pA, pB]);
+
+  // ---- Damage Taken tab helpers ----
+  const primaryPlayer = useMemo(() => (pA || pB || ''), [pA, pB]);
+
+  const windowBounds = useMemo(() => {
+    const start = timeline.length ? timeline[0].t : 0;
+    const end   = timeline.length ? timeline[timeline.length - 1].t : duration;
+    return { start, end };
+  }, [timeline, duration]);
+
+  const deathsForPrimary = useMemo(() => {
+    const who = normalizeActorName(canonEntity(primaryPlayer));
+    if (!who) return [];
+    const { start, end } = windowBounds;
+    return deathEvents
+      .filter(d => normalizeActorName(canonEntity(d.name)) === who && d.t >= start && d.t <= end)
+      .sort((a,b)=>a.t-b.t);
+  }, [deathEvents, primaryPlayer, windowBounds]);
+
+  // Keep a stable selected death key; default to latest death in window
+  useEffect(() => {
+    if (!deathsForPrimary.length) {
+      if (selectedDeathKey) setSelectedDeathKey('');
+      return;
+    }
+    if (!selectedDeathKey || !deathsForPrimary.some(d => String(d.t) === selectedDeathKey)) {
+      setSelectedDeathKey(String(deathsForPrimary[deathsForPrimary.length - 1].t));
+    }
+  }, [deathsForPrimary, selectedDeathKey]);
+
+  const selectedDeath = useMemo(() => {
+    if (!selectedDeathKey) return null;
+    const t = Number(selectedDeathKey);
+    return deathsForPrimary.find(d => d.t === t) || null;
+  }, [selectedDeathKey, deathsForPrimary]);
+
+  const deathWindow = useMemo(() => {
+    if (!selectedDeath) return null;
+    const end = selectedDeath.t;
+    const start = Math.max(0, end - DEATH_SNAPSHOT_SEC);
+    return { start, end };
+  }, [selectedDeath]);
+
+  const deathSnap = useMemo(() => {
+    if (!primaryPlayer || !deathWindow) return null;
+    const who = normalizeActorName(canonEntity(primaryPlayer));
+    const { start, end } = deathWindow;
+
+    const dmg = damageEvents.filter(e => canonEntity(e.dst) === who && e.t >= start && e.t <= end);
+    const heals = healEvents.filter(e => canonEntity(e.dst) === who && e.t >= start && e.t <= end);
+    const util = utilityEvents.filter(e => canonDyn(e.src) === canonDyn(who) && e.t >= start && e.t <= end);
+
+    // Killing blow = last damage event in window
+    const killing = dmg.slice().sort((a,b)=>a.t-b.t).at(-1) || null;
+
+    const totalDmg = dmg.reduce((s,e)=>s+e.amount,0);
+    const totalHeal = heals.reduce((s,e)=>s+e.amount,0);
+
+    // ---- Snapshot series ----
+    // Per-second bins (0..DEATH_SNAPSHOT_SEC). This matches the axis ticks and your expectation
+    // that each bar represents one second.
+    const step = 1;
+    const bins = DEATH_SNAPSHOT_SEC;
+
+    const healsByBin: number[] = Array.from({ length: bins + 1 }, () => 0);
+    const dmgByBin: number[]   = Array.from({ length: bins + 1 }, () => 0);
+
+    // Tooltip wants per-bin breakdowns
+    const healByWho: Record<number, Record<string, number>> = {};
+    const dmgByWhat: Record<number, Record<string, number>> = {};
+
+    const toBin = (t:number) => {
+      const rel = Math.max(0, Math.min(DEATH_SNAPSHOT_SEC, t - start));
+      return Math.max(0, Math.min(bins, Math.floor(rel / step)));
+    };
+
+    for (const e of heals) {
+      const bi = toBin(e.t);
+      healsByBin[bi] += e.amount;
+      if (!healByWho[bi]) healByWho[bi] = {};
+      const whoHealed = canonDyn(e.src);
+      healByWho[bi][whoHealed] = (healByWho[bi][whoHealed] || 0) + e.amount;
+    }
+    for (const e of dmg) {
+      const bi = toBin(e.t);
+      dmgByBin[bi] += e.amount;
+      if (!dmgByWhat[bi]) dmgByWhat[bi] = {};
+      const what = (e.ability ? String(e.ability) : 'Damage');
+      dmgByWhat[bi][what] = (dmgByWhat[bi][what] || 0) + e.amount;
+    }
+
+    // HP remaining is estimated by forcing HP to hit 0 at death.
+    // If we assume HP_end = 0, then HP_start = totalDmg - totalHeal.
+    const startHP = Math.max(1, Math.round(totalDmg - totalHeal));
+
+    // Build chart series forward from start -> death.
+    let hp = startHP;
+    const chartSeries = Array.from({ length: bins + 1 }, (_, i) => {
+      const heal = healsByBin[i] || 0;
+      const dmgAmt = dmgByBin[i] || 0;
+
+      // Track top heal/dmg for tooltip summary
+      const hb = healByWho[i] || {};
+      const db = dmgByWhat[i] || {};
+      const topHeal = Object.entries(hb).sort((a,b)=> (b[1] as number) - (a[1] as number))[0] as any;
+      const topDmg  = Object.entries(db).sort((a,b)=> (b[1] as number) - (a[1] as number))[0] as any;
+
+      const row = {
+        x: i,
+        heal,
+        dmg: -dmgAmt, // negative so it plots below 0
+        hp,
+        healBy: hb,
+        dmgBy: db,
+        topHealWho: topHeal ? topHeal[0] : undefined,
+        topHealAmt: topHeal ? topHeal[1] : 0,
+        topDmgWhat: topDmg ? topDmg[0] : undefined,
+        topDmgAmt: topDmg ? topDmg[1] : 0,
+      };
+
+      // advance HP to next second
+      hp = Math.max(0, hp + heal - dmgAmt);
+      return row;
+    });
+
+    const maxEvt = Math.max(
+      1,
+      ...chartSeries.map(r => Math.max(Math.abs(Number(r.heal) || 0), Math.abs(Number(r.dmg) || 0)))
+    );
+
+    // Heal labels: choose a few biggest heals across the window and label with healer name.
+    const healLabels = Object.entries(healByWho)
+      .flatMap(([biStr, m]) => {
+        const bi = Number(biStr);
+        return Object.entries(m || {}).map(([whoHealed, amt]) => ({ x: bi, who: whoHealed, y: chartSeries[bi]?.hp ?? 0, amt }));
+      })
+      .filter(r => (Number(r.amt) || 0) > 0)
+      .sort((a,b)=> (Number(b.amt)||0) - (Number(a.amt)||0))
+      .slice(0, 8);
+
+
+    // Event feed (merged), sorted latest → earliest
+    const feed = [
+      ...dmg.map(e=>({ kind:'damage' as const, t:e.t, src:e.src, dst:e.dst, ability:e.ability, amount:e.amount, flags:e.flags, blocked:e.blocked, absorbed:e.absorbed })),
+      ...heals.map(e=>({ kind:'heal' as const, t:e.t, src:e.src, dst:e.dst, ability:e.ability, amount:e.amount })),
+      ...util.map(e=>({ kind:'utility' as const, t:e.t, src:e.src, dst: who, ability:e.ability, amount:0 }))
+    ].sort((a,b)=> b.t - a.t);
+
+    return {
+      dmg,
+      heals,
+      util,
+      killing,
+      totalDmg,
+      totalHeal,
+      startHP,
+      maxEvt,
+      chartSeries,
+      healLabels,
+      feed,
+    };
+  }, [primaryPlayer, deathWindow, damageEvents, healEvents, utilityEvents]);
+
+  const topAttackersForPrimary = useMemo(() => {
+    const who = normalizeActorName(canonEntity(primaryPlayer));
+    if (!who) return [];
+    const m = perTakenBy[who] || {};
+    const rows = Object.entries(m).map(([name, value]) => ({ name, value: Number(value) || 0 }))
+      .sort((a,b)=>b.value-a.value);
+    return rows;
+  }, [primaryPlayer, perTakenBy]);
+
+  const topAttackersTotalForPrimary = useMemo(() => topAttackersForPrimary.reduce((s:any, r:any) => s + (Number(r.value)||0), 0), [topAttackersForPrimary]);
+
+const renderTopAttackerValueLabel = (props: any) => {
+  const { x, y, width, height, value } = props || {};
+  const v = Number(value || 0);
+  const pct = topAttackersTotalForPrimary ? (v / topAttackersTotalForPrimary) : 0;
+
+  const label = `${fmt0(v)} (${fmtPct(pct)})`;
+  const tx = (Number(x) || 0) + (Number(width) || 0) + 12;
+  const ty = (Number(y) || 0) + (Number(height) || 0) / 2 + 4;
+
+  return (
+    <text
+      x={tx}
+      y={ty}
+      fill="rgba(235,252,255,.92)"
+      fontSize={14}
+      fontWeight={850}
+      className="mono"
+    >
+      {label}
+    </text>
+  );
+};
+
+  const incomingByAbilityForPrimary = useMemo(() => {
+    const who = normalizeActorName(canonEntity(primaryPlayer));
+    if (!who) return [];
+    const events = damageEvents.filter(e => canonEntity(e.dst) === who);
+
+    type Row = {
+      ability: string;
+      hits: number;
+      damage: number;
+      avg: number;
+      max: number;
+      critPct: number;
+      glancePct: number;
+      elemTop: string;
+      stPct: number;
+      dodge: number;
+      parry: number;
+      block: number;
+    };
+
+    const agg: Record<string, any> = {};
+    const addElem = (a:any, elems?:Record<string,number>) => {
+      if (!elems) return;
+      for (const [k,v] of Object.entries(elems)) {
+        a.elem[k] = (a.elem[k]||0) + (v as number);
+      }
+    };
+
+    for (const e of events) {
+      const abil = normalizeAbilityKey(e.ability);
+      const a = agg[abil] || (agg[abil] = { hits:0, dmg:0, max:0, crit:0, glance:0, st:0, dodge:0, parry:0, block:0, elem:{} as Record<string,number> });
+      a.hits += 1;
+      a.dmg += e.amount;
+      if (e.amount > a.max) a.max = e.amount;
+
+      const f = (e.flags||'').toLowerCase();
+      const abilRaw = String(e.ability||'').toLowerCase();
+
+      // Some logs encode crit/glance in the *text* (e.g. "critically hits") but the worker may label it as a normal hit.
+      const critByText = /(?:\bcrits?\b|\bcritical(?:ly)?\s+hits?\b)/i.test(abilRaw);
+      const glanceByText = /\bglances?\b/i.test(abilRaw);
+
+      if (f.includes('crit') || critByText) a.crit += 1;
+      if (f.includes('glance') || glanceByText) a.glance += 1;
+      if (f.includes('strikethrough')) a.st += 1;
+      if (f.includes('dodge')) a.dodge += 1;
+      if (f.includes('parry')) a.parry += 1;
+      if ((e.blocked||0) > 0) a.block += 1;
+
+      addElem(a, (e as any).elements);
+    }
+
+    const rows: Row[] = Object.entries(agg).map(([ability, a]) => {
+      const avg = a.hits ? a.dmg / a.hits : 0;
+      const critPct = a.hits ? a.crit / a.hits : 0;
+      const glancePct = a.hits ? a.glance / a.hits : 0;
+      const stPct = a.hits ? a.st / a.hits : 0;
+
+      // pick dominant element
+      let elemTop = '—';
+      const entries = Object.entries(a.elem).sort((x,y)=>(y[1] as number)-(x[1] as number));
+      if (entries.length) elemTop = titleCase(entries[0][0]);
+
+      return { ability, hits:a.hits, damage:a.dmg, avg, max:a.max, critPct, glancePct, elemTop, stPct, dodge:a.dodge, parry:a.parry, block:a.block };
+    });
+
+    return rows.sort((a,b)=>b.damage-a.damage);
+  }, [primaryPlayer, damageEvents]);
+
+  const damageTakenKpisForPrimary = useMemo(() => {
+    const who = normalizeActorName(canonEntity(primaryPlayer));
+    if (!who) {
+      return {
+        totalDamage: 0,
+        elem: {} as Record<string, number>,
+        avgAbsorbed: 0,
+        mitigatedRatio: 0,
+        unmitigatedRatio: 0,
+        mitigatedCount: 0,
+        totalCount: 0,
+      };
+    }
+
+    const events = damageEvents.filter(e => canonEntity(e.dst) === who);
+
+    let totalDamage = 0;
+    const elem: Record<string, number> = {};
+    let absorbedSum = 0;
+    let absorbedHits = 0;
+    let absorbedDamageSum = 0;
+
+    let mitigatedCount = 0;
+
+    for (const e of events) {
+      const amt = Number(e.amount || 0);
+      totalDamage += amt;
+
+      // Elemental breakdown (if missing/empty, treat as Unknown for accounting).
+      const breakdown = (e as any).elements as (Record<string, number> | undefined);
+      if (breakdown && Object.keys(breakdown).length) {
+        for (const [k, v] of Object.entries(breakdown)) {
+          elem[k] = (elem[k] || 0) + Number(v || 0);
+        }
+      } else {
+        elem["Unknown"] = (elem["Unknown"] || 0) + amt;
+      }
+
+      const a = Number((e as any).absorbed || 0);
+      if (a > 0) {
+        absorbedSum += a;
+        absorbedHits += 1;
+        absorbedDamageSum += amt;
+      }
+
+      const f = String((e as any).flags || "").toLowerCase();
+      const isDodge = f.includes("dodge");
+      const isParry = f.includes("parry");
+      const isGlance = f.includes("glance");
+      const isEvade = f.includes("evade") || (Number((e as any).evadedPct || 0) > 0);
+      const isBlock = Number((e as any).blocked || 0) > 0;
+
+      // "Mitigated" bucket per your definition: dodge/parry/block/glance/evade
+      if (isDodge || isParry || isBlock || isGlance || isEvade) mitigatedCount += 1;
+    }
+
+    const totalCount = events.length || 0;
+    const mitigatedRatio = totalCount ? mitigatedCount / totalCount : 0;
+    const unmitigatedRatio = totalCount ? 1 - mitigatedRatio : 0;
+
+    const avgAbsorbed = absorbedHits ? absorbedSum / absorbedHits : 0;
+    // Portion of (damage + absorbed) that was absorbed by armor across the window.
+    const avgAbsorbedPct = absorbedSum + absorbedDamageSum > 0 ? absorbedSum / (absorbedSum + absorbedDamageSum) : 0;
+
+    return {
+      totalDamage,
+      elem,
+      avgAbsorbed,
+      avgAbsorbedPct,
+      mitigatedRatio,
+      unmitigatedRatio,
+      mitigatedCount,
+      totalCount,
+    };
+  }, [primaryPlayer, damageEvents]);
+
 
   const TLdps = useMemo(()=> timelineView.map(d=>({t:d.t, v:d.dps})), [timelineView]);
   const TLhps = useMemo(()=> timelineView.map(d=>({t:d.t, v:d.hps})), [timelineView]);
@@ -2295,11 +5171,43 @@ const playersForSummary = useMemo(() => {
   const aSeries = useMemo(()=> smooth ? smoothSeries(seriesFor(pA), 7) : seriesFor(pA), [pA, perSrc, timeline, smooth]);
   const bSeries = useMemo(()=> smooth ? smoothSeries(seriesFor(pB), 7) : seriesFor(pB), [pB, perSrc, timeline, smooth]);
 
+  // Timeline mode:
+  // - "Summary" shows WarcraftLogs-style aggregate lines.
+  // - "Compared" shows per-player lines (your current view).
+  const [timelineMode, setTimelineMode] = useState<'summary' | 'compare'>('summary');
+
+  // Exclude segment-identification NPCs from player-derived views (top lines, hover breakdown, panels)
+  const rowsPlayers = useMemo(() => rows.filter(r => !isSegmentNpcName(r.name)), [rows]);
+
   // NEW: Top 10 lines (by total damage in current window)
   const top10Names = useMemo(
-    () => [...rows].sort((a,b)=> b.damageDealt - a.damageDealt).slice(0,10).map(r=> r.name),
-    [rows]
+    () => [...rowsPlayers].sort((a,b)=> b.damageDealt - a.damageDealt).slice(0,10).map(r=> r.name),
+    [rowsPlayers]
   );
+
+  // Top names are normally damage-driven, but we also want healers (e.g. Medics) to show up in the hover breakdown.
+  // So we build Top-8 by damage AND Top-8 by healing, then union them (deduped by canonical actor key).
+  const top8DamageNames = useMemo(
+    () => [...rowsPlayers].sort((a,b)=> b.damageDealt - a.damageDealt).slice(0,8).map(r=> r.name),
+    [rowsPlayers]
+  );
+  const top8HealNames = useMemo(
+    () => [...rowsPlayers].sort((a,b)=> (Number(b.healingDone||0) - Number(a.healingDone||0))).slice(0,8).map(r=> r.name),
+    [rowsPlayers]
+  );
+  const top8Names = useMemo(() => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const n of [...top8DamageNames, ...top8HealNames]) {
+      if (!n) continue;
+      const key = canonActor(n);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(n);
+    }
+    return out;
+  }, [top8DamageNames, top8HealNames]);
+
   const top10Series = useMemo(
     () => top10Names.map(name => ({
       name,
@@ -2342,6 +5250,474 @@ const deathFlags = useMemo(() => {
     });
   }, [timeline, top10Series]);
 
+  // Build a per-second "damage taken" series for a chosen set of players (e.g. top-8 damage).
+  const takenByTop8 = useMemo(() => {
+    if (!damageEvents?.length || !top8Names.length || !timeline.length) return new Map<number, number>();
+    const allow = new Set(top8Names.map(canonActor));
+    const start = timeline[0]?.t ?? 0;
+    const end = timeline.length ? timeline[timeline.length - 1].t : duration;
+    const m = new Map<number, number>();
+    for (const e of damageEvents as any[]) {
+      const t = Number(e?.t ?? 0);
+      // Keep this scoped to the currently selected window (timeline start/end).
+      if (t < start || t > end) continue;
+      const dst = canonActor(String(e?.dst || ''));
+      if (!allow.has(dst)) continue;
+      const amt = Number(e?.amount || 0);
+      if (!amt) continue;
+      m.set(t, (m.get(t) || 0) + amt);
+    }
+    return m;
+  }, [damageEvents, top8Names, timeline, duration]);
+
+  // Map of t -> total healing done for that second (already computed in timeline from the worker).
+  const hpsBySecond = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const p of timeline as any[]) m.set(Number(p?.t ?? 0), Number(p?.hps || 0));
+    return m;
+  }, [timeline]);
+
+  
+  // Per-second breakdown for the *Top 8 damage dealers* (used by the timeline hover HUD).
+  const takenBySecondByActorTop8 = useMemo(() => {
+    const m = new Map<number, Record<string, number>>();
+    const topSet = new Set(top8Names.map(canonActor));
+    for (const ev of damageEvents as any[]) {
+      const t = Math.floor(Number(ev?.t ?? 0));
+      if (!Number.isFinite(t)) continue;
+
+      // target/defender name can appear under different keys depending on the log line
+      const rawTarget = (ev?.dst ?? ev?.target ?? ev?.victim ?? ev?.defender ?? '') as string;
+      const target = canonActor(String(rawTarget || ''));
+      if (!target || !topSet.has(target)) continue;
+
+      const amt = Number(ev?.amount ?? 0) || 0;
+      if (!amt) continue;
+
+      const row = m.get(t) || {};
+      row[target] = (row[target] || 0) + amt;
+      m.set(t, row);
+    }
+    return m;
+  }, [damageEvents, top8Names]);
+
+  const healBySecondByActorTop8 = useMemo(() => {
+    const m = new Map<number, Record<string, number>>();
+    const topSet = new Set(top8Names.map(canonActor));
+    for (const ev of healEvents as any[]) {
+      const t = Math.floor(Number(ev?.t ?? 0));
+      if (!Number.isFinite(t)) continue;
+
+      const healer = canonActor(String(ev?.src ?? ''));
+      if (!healer || !topSet.has(healer)) continue;
+
+      const amt = Number(ev?.amount ?? 0) || 0;
+      if (!amt) continue;
+
+      const row = m.get(t) || {};
+      row[healer] = (row[healer] || 0) + amt;
+      m.set(t, row);
+    }
+    return m;
+  }, [healEvents, top8Names]);
+
+  // Top-8 healers (by total healing done) for the summary timeline.
+  // This is independent from top8Names (top-8 damage dealers).
+  const top8Healers = useMemo(() => {
+    const totals = new Map<string, { canon: string; best: string; total: number }>();
+    for (const ev of healEvents as any[]) {
+      const raw = String(ev?.src ?? '');
+      const canon = canonActor(raw);
+      if (!canon) continue;
+      const amt = Number(ev?.amount ?? 0) || 0;
+      if (!amt) continue;
+      const cur = totals.get(canon) || { canon, best: stripTrailingApostrophe(raw).trim() || raw, total: 0 };
+      cur.total += amt;
+      // Keep the prettiest display name we saw for this canonical key.
+      const pretty = stripTrailingApostrophe(raw).trim() || raw;
+      if (pretty.length > cur.best.length) cur.best = pretty;
+      totals.set(canon, cur);
+    }
+    return [...totals.values()].sort((a, b) => b.total - a.total).slice(0, 8).map((x) => x.canon);
+  }, [healEvents]);
+
+  const healTop8BySecond = useMemo(() => {
+    const set = new Set(top8Healers);
+    const m = new Map<number, number>();
+    for (const ev of healEvents as any[]) {
+      const t = Math.floor(Number(ev?.t ?? 0));
+      if (!Number.isFinite(t)) continue;
+      const healer = canonActor(String(ev?.src ?? ''));
+      if (!healer || !set.has(healer)) continue;
+      const amt = Number(ev?.amount ?? 0) || 0;
+      if (!amt) continue;
+      m.set(t, (m.get(t) || 0) + amt);
+    }
+    return m;
+  }, [healEvents, top8Healers]);
+
+// Summary (default) dataset: aggregate lines similar to Warcraft Logs.
+  //  - Damage Done: sum of top-8 DPS sources
+  //  - Damage Taken: incoming damage to those same top-8 sources
+  //  - Healing Done: total healing (all sources)
+  //  - Healing (Top 8): sum of top-8 healers (by total healing done)
+  const summaryData = useMemo(() => {
+    if (!top10Data.length) return [] as any[];
+    return top10Data.map((row: any) => {
+      const t = Number(row.t);
+      let dmg = 0;
+      for (const name of top8Names) dmg += Number(row?.[name] || 0);
+      const taken = Number(takenByTop8.get(t) || 0);
+      const heal = Number(hpsBySecond.get(t) || 0);
+      const healTop8 = Number(healTop8BySecond.get(t) || 0);
+      return { t, dmg, taken, heal, healTop8 };
+    });
+  }, [top10Data, top8Names, takenByTop8, hpsBySecond, healTop8BySecond]);
+
+  // Mini overview (for brush/zoom): total DPS of the top-10 lines.
+  const overviewData = useMemo(() => {
+    if (!top10Data.length) return [] as Array<{ t: number; total: number }>;
+    return top10Data.map((row: any) => {
+      let total = 0;
+      for (const { name } of top10Series) total += Number(row?.[name] || 0);
+      return { t: Number(row.t), total };
+    });
+  }, [top10Data, top10Series]);
+
+  const overviewDataSummary = useMemo(() => {
+    if (!summaryData.length) return [] as Array<{ t: number; total: number }>;
+    return summaryData.map((r: any) => ({ t: Number(r.t), total: Number(r.dmg || 0) }));
+  }, [summaryData]);
+
+  // Keep the brush synced to the current window.
+  const brushRange = useMemo(() => {
+    if (!top10Data.length) return { startIndex: 0, endIndex: 0 };
+    const t0 = windowStart;
+    const t1 = windowEnd;
+    let si = 0;
+    let ei = top10Data.length - 1;
+    for (let i = 0; i < top10Data.length; i++) {
+      const t = Number((top10Data as any)[i]?.t ?? 0);
+      if (t <= t0) si = i;
+      if (t <= t1) ei = i;
+    }
+    if (ei < si) ei = si;
+    return { startIndex: si, endIndex: ei };
+  }, [top10Data, windowStart, windowEnd]);
+
+  const onBrushChange = useCallback((range: any) => {
+    if (!range || !top10Data.length) return;
+    const si = Math.max(0, Math.min(top10Data.length - 1, Number(range.startIndex ?? 0)));
+    const ei = Math.max(0, Math.min(top10Data.length - 1, Number(range.endIndex ?? (top10Data.length - 1))));
+    const t0 = Number((top10Data as any)[Math.min(si, ei)]?.t ?? windowStart);
+    const t1 = Number((top10Data as any)[Math.max(si, ei)]?.t ?? windowEnd);
+    if (Number.isFinite(t0) && Number.isFinite(t1) && Math.abs(t1 - t0) >= 1) commitWindow(t0, t1);
+  }, [top10Data, commitWindow, windowStart, windowEnd]);
+
+  // Segment chooser helpers: make the dropdown more readable by grouping by instance/dungeon.
+  const segView = useMemo(() => {
+    const parse = (label: string) => {
+      const parts = String(label || '').split('—');
+      const inst = (parts[0] || '').trim();
+      const rest = (parts.slice(1).join('—') || '').trim();
+      const pretty = INSTANCE_PRETTY[inst]?.title || inst || 'Segment';
+      const sub = INSTANCE_PRETTY[inst]?.subtitle;
+      return { inst, pretty, sub, rest };
+    };
+
+    const items = segments.map((s, i) => {
+      const p = parse(s.label);
+      return {
+        i,
+        ...s,
+        inst: p.inst,
+        dungeon: p.pretty,
+        dungeonShort: p.sub,
+        rangeText: p.rest,
+      };
+    });
+
+    const groups = new Map<string, typeof items>();
+    for (const it of items) {
+      const key = it.dungeon || 'Other';
+      const cur = groups.get(key);
+      if (cur) cur.push(it);
+      else groups.set(key, [it]);
+    }
+    return { items, groups };
+  }, [segments]);
+
+  // Segments rendered as horizontal bands across the timeline (Warcraft Logs style).
+  const segBandsRaw = useMemo(() => {
+    return segView.items
+      .map((s) => {
+        const title = s.dungeon || 'Segment';
+        const sub = s.dungeonShort || '';
+        // Keep the band label short.
+        const label = sub ? `${sub}` : title;
+        return { start: s.start, end: s.end, label, full: title };
+      })
+      .filter((s) => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start);
+  }, [segView.items]);
+
+  // Merge adjacent segments that resolve to the same label to avoid "double boxes".
+  const segBands = useMemo(() => {
+    const items = [...segBandsRaw].sort((a, b) => a.start - b.start);
+    const merged: { start: number; end: number; label: string; full: string }[] = [];
+    const MERGE_GAP_S = 1; // treat touching/near-touching as continuous
+    for (const s of items) {
+      const last = merged[merged.length - 1];
+      if (
+        last &&
+        last.label === s.label &&
+        last.full === s.full &&
+        s.start <= last.end + MERGE_GAP_S
+      ) {
+        last.end = Math.max(last.end, s.end);
+      } else {
+        merged.push({ ...s });
+      }
+    }
+    return merged;
+  }, [segBandsRaw]);
+
+  const renderSegBands = useCallback((props: any) => {
+    try {
+      const xAxisKey = Object.keys(props?.xAxisMap || {})[0];
+      const xAxis = xAxisKey ? (props.xAxisMap[xAxisKey] as any) : null;
+      const scale = xAxis?.scale;
+      const offset = props?.offset;
+      if (!scale || !offset) return null;
+
+      // Segment label display tweaks (keep the underlying segment timings intact).
+      const displaySegName = (name: string) => {
+        const n = String(name || '').trim();
+        if (!n) return n;
+        // Requested shorthand
+        if (n.toLowerCase() === 'tusken king') return 'TK';
+        return n;
+      };
+
+      // If multiple adjacent segments share the same (display) name, merge them into a single band.
+      // This prevents repeated labels like "Tusken King" appearing multiple times in a row.
+      const mergedSegBands = (() => {
+        const src = (segBands || [])
+          .map((s: any) => ({
+            ...s,
+            __disp: displaySegName(String(s.full || s.label || '')),
+          }))
+          .sort((a: any, b: any) => Number(a.start) - Number(b.start));
+
+        const out: any[] = [];
+        const EPS = 1e-3; // allow tiny gaps due to rounding
+        for (const s of src) {
+          if (!Number.isFinite(Number(s.start)) || !Number.isFinite(Number(s.end))) continue;
+          const last = out[out.length - 1];
+          if (last && String(last.__disp) === String(s.__disp) && Number(s.start) <= Number(last.end) + EPS) {
+            // Merge by extending the end time.
+            last.end = Math.max(Number(last.end), Number(s.end));
+            // Keep the richest label fields.
+            last.full = last.full || s.full;
+            last.label = last.label || s.label;
+          } else {
+            out.push({ ...s });
+          }
+        }
+        return out;
+      })();
+
+      // Place segment bands safely *outside* the plot-area clip-path so labels never get cut when zooming.
+      // Anchor relative to the chart's top margin (or offset.y as fallback) and clamp inside the SVG viewport.
+      const chartTop = (props?.margin?.top ?? offset.y ?? 40);
+      const y = Math.max(2, chartTop - 26); // sits just above the plot area, below the controls
+      const h = 22;
+
+      return (
+        <g>
+          <defs>
+            <linearGradient id="segBandGradA" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="rgba(120,200,255,0.18)" />
+              <stop offset="100%" stopColor="rgba(70,140,230,0.08)" />
+            </linearGradient>
+            <linearGradient id="segBandGradB" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="rgba(255,220,140,0.16)" />
+              <stop offset="100%" stopColor="rgba(255,200,90,0.07)" />
+            </linearGradient>
+            <filter id="segBandShadow" x="-20%" y="-40%" width="140%" height="200%">
+              <feDropShadow dx="0" dy="2" stdDeviation="2" floodColor="rgba(0,0,0,0.45)" />
+            </filter>
+          </defs>
+          {mergedSegBands.map((s, i) => {
+            const x1 = Number(scale(s.start));
+            const x2 = Number(scale(s.end));
+            if (!Number.isFinite(x1) || !Number.isFinite(x2)) return null;
+            const left = Math.min(x1, x2);
+            const w = Math.max(0, Math.abs(x2 - x1));
+            if (w < 6) return null;
+            const isAlt = i % 2 === 1;
+            const fill = isAlt ? 'url(#segBandGradB)' : 'url(#segBandGradA)';
+            const stroke = 'rgba(150,205,255,0.22)';
+            const rx = 10;
+            const textY = y + (h / 2);
+
+            // Wrap the label inside the band (2 lines max) so long names remain readable.
+            const fullLabel = displaySegName(String(s.full || s.label || ''));
+
+            // Trim segment to the visible viewport so off-screen segments don't create giant overlapping boxes when zoomed.
+            const rawLeft = left;
+            const rawRight = left + w;
+            const boxLeft = Math.max(0, rawLeft);
+            const boxRight = Math.min(offset.width, rawRight);
+            const boxW = Math.max(0, boxRight - boxLeft);
+            if (boxW < 6) return null;
+
+            const textX = boxLeft + (boxW / 2);
+            const maxCharsPerLine = Math.max(4, Math.floor((boxW - 20) / 7)); // ~7px/char
+            const words = fullLabel.split(/\s+/).filter(Boolean);
+
+            const lines: string[] = [];
+            let cur = '';
+            const pushLine = (line: string) => {
+              if (line.trim()) lines.push(line.trim());
+            };
+
+            for (const word of words) {
+              // If a single word is too long, hard-split it.
+              const parts: string[] = [];
+              if (word.length > maxCharsPerLine) {
+                for (let k = 0; k < word.length; k += maxCharsPerLine) {
+                  parts.push(word.slice(k, k + maxCharsPerLine));
+                }
+              } else {
+                parts.push(word);
+              }
+
+              for (const part of parts) {
+                const cand = cur ? `${cur} ${part}` : part;
+                if (cand.length <= maxCharsPerLine) {
+                  cur = cand;
+                } else {
+                  pushLine(cur);
+                  cur = part;
+                  if (lines.length >= 2) break;
+                }
+              }
+              if (lines.length >= 2) break;
+            }
+            pushLine(cur);
+
+            // Clamp to 2 lines and ellipsize the last line if we had to drop words.
+            const hadMore = words.join(' ').length > lines.join(' ').length;
+            if (lines.length > 2) lines.length = 2;
+            if (lines.length === 2 && hadMore) {
+              const l = lines[1];
+              lines[1] = l.length > Math.max(1, maxCharsPerLine - 1) ? (l.slice(0, maxCharsPerLine - 1) + '…') : (l + '…');
+            }
+
+            const showText = boxW >= 70 && lines.length > 0;
+            const clipId = `segclip-${i}-${Math.round(s.start * 1000)}-${Math.round(s.end * 1000)}`;
+            return (
+              <g key={`${s.start}-${s.end}-${i}`} style={{ cursor: 'pointer' }} onClick={() => commitWindow(s.start, s.end)}>
+                {/* Segment label (single box; can be wider than the raw segment). */}
+                <defs>
+                  <clipPath id={clipId}>
+                    <rect x={boxLeft} y={y} width={boxW} height={h} rx={rx} ry={rx} />
+                  </clipPath>
+                </defs>
+                <g filter="url(#segBandShadow)">
+                <rect x={boxLeft} y={y} width={boxW} height={h} rx={rx} ry={rx} fill={fill} stroke={stroke} />
+                <rect clipPath={`url(#${clipId})`} x={boxLeft} y={y + 1} width={boxW} height={Math.max(0, Math.floor(h / 2) - 1)} rx={rx} ry={rx} fill="rgba(255,255,255,0.06)" />
+                </g>
+                {showText && (
+                  <text
+                    clipPath={`url(#${clipId})`}
+                    x={textX}
+                    y={textY}
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    fill="rgba(229,245,255,0.94)"
+                    fontSize={11}
+                    fontWeight={900}
+                    letterSpacing={0.35}
+                    stroke="rgba(6,12,22,0.75)"
+                    strokeWidth={3}
+                    style={{ userSelect: 'none', pointerEvents: 'none', paintOrder: 'stroke' }}
+
+                  >
+                    {lines.slice(0, 2).map((ln, li) => (
+                      <tspan key={li} x={textX} dy={li === 0 ? (lines.length === 2 ? -3 : 0) : 11}>
+                        {ln}
+                      </tspan>
+                    ))}
+</text>
+                )}
+              </g>
+            );
+          })}
+        </g>
+      );
+    } catch {
+      return null;
+    }
+  }, [segBands, commitWindow]);
+
+  const hoverSummary = useMemo(() => {
+    const data = (timelineMode === 'summary') ? (summaryData as any[]) : (top10Data as any[]);
+    if (hoverX == null || !data.length) return null;
+    // exact match is common (hoverX is activeLabel), fall back to nearest.
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < data.length; i++) {
+      const t = Number((data as any)[i]?.t ?? 0);
+      const d = Math.abs(t - hoverX);
+      if (d < bestDist) { bestDist = d; bestIdx = i; if (d === 0) break; }
+    }
+    if (bestIdx < 0) return null;
+    const row: any = (data as any)[bestIdx];
+
+    // Always show Top-3 damage dealers at that moment.
+    // In summary mode, the row only has dmg/taken/heal, so pull per-player values from top10Data.
+    const perPlayerRow: any = (timelineMode === 'summary')
+      ? ((top10Data as any[])[bestIdx] || {})
+      : row;
+
+    const top = top10Series
+      .map(s => ({ name: s.name, v: Number(perPlayerRow?.[s.name] || 0), color: s.color }))
+      .sort((a,b) => b.v - a.v)
+      .slice(0, 3);
+
+    const total = (timelineMode === 'summary')
+      ? Number(row?.dmg || 0)
+      : top8Names.reduce((acc, n) => acc + Number(row?.[n] || 0), 0);
+
+    const t = Number(row.t);
+
+    const takenRow = takenBySecondByActorTop8.get(t) || {};
+    const healRow = healBySecondByActorTop8.get(t) || {};
+
+    const breakdown = top8Names
+      .map((name) => {
+        const key = canonActor(name);
+        return {
+          name,
+          dmg: Number(perPlayerRow?.[name] || 0),
+          taken: Number((takenRow as any)?.[key] || 0),
+          heal: Number((healRow as any)?.[key] || 0),
+        };
+      })
+      .sort((a, b) => (b.dmg + b.heal) - (a.dmg + a.heal));
+
+    return { t, total, top, row, breakdown };
+  }, [hoverX, top10Data, summaryData, top10Series, top8Names, timelineMode]);
+
+  const maxYSummary = useMemo(() => {
+    let m = 0;
+    for (const r of summaryData as any[]) {
+      m = Math.max(m, Number(r?.dmg || 0), Number(r?.taken || 0), Number(r?.heal || 0));
+    }
+    return m || 1;
+  }, [summaryData]);
+
   // Y-axis max across Top-10 and A/B overlays
   const maxY = useMemo(() => {
     let m = 0;
@@ -2362,7 +5738,41 @@ const deathFlags = useMemo(() => {
 
   return <ErrorBoundary>
     <div className="swg-theme">
-      <style dangerouslySetInnerHTML={{ __html: SW_CSS }} />
+      {/* Welcome / Main Menu */}
+      <AnimatePresence mode="wait">
+        {showWelcome && (
+          <WelcomeScreen
+          onSelect={(mode) => {
+            setAnalyzerMode(mode);
+            setShowWelcome(false);
+          }}
+        />
+        )}
+      </AnimatePresence>
+
+      
+      {analyzerMode === "pvp" && !showWelcome && (
+        <div
+          style={{
+            position: "fixed",
+            top: 12,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 9000,
+            padding: "10px 14px",
+            borderRadius: 999,
+            background: "rgba(0,0,0,0.55)",
+            border: "1px solid rgba(255,255,255,0.18)",
+            backdropFilter: "blur(10px)",
+            fontSize: 12,
+            letterSpacing: ".08em",
+            textTransform: "uppercase",
+          }}
+        >
+          PVP mode selected — PVP-specific panels coming next (running PVE pipeline for now)
+        </div>
+      )}
+<style dangerouslySetInnerHTML={{ __html: SW_CSS }} />
       <style dangerouslySetInnerHTML={{ __html: RIBBON_CSS }} />
       <style dangerouslySetInnerHTML={{ __html: RIBBON_EXTRA }} />
       <style dangerouslySetInnerHTML={{ __html: ENC_CSS }} />
@@ -2439,6 +5849,22 @@ const deathFlags = useMemo(() => {
           <div style={{ alignSelf:'flex-start' }}><div style={{ fontSize:13, fontWeight:800, color:'#9fb7d8', letterSpacing:.3 }}>DPS Over Time - Top 10</div></div>
           <div className="row" style={{gap:8, alignItems:'center', justifyContent:'center', flexWrap:'wrap', width:'100%', marginTop:6}}>
             <label className="row" style={{gap:6}}><input type="checkbox" checked={smooth} onChange={e=>setSmooth(e.target.checked)} /><span className="pill">Smooth</span></label>
+            <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+              <button
+                className={"btn" + (timelineMode === 'summary' ? ' active' : '')}
+                onClick={() => setTimelineMode('summary')}
+                title="Aggregate view (Damage Done, Damage Taken, Healing Done)"
+              >
+                Summary Mode
+              </button>
+              <button
+                className={"btn" + (timelineMode === 'compare' ? ' active' : '')}
+                onClick={() => setTimelineMode('compare')}
+                title="Show individual damage lines (Top 10)"
+              >
+                Compared Damage Mode
+              </button>
+            </div>
             <label className="row" style={{gap:6}}>
               <span className="pill">Idle gap (s)</span>
               <input className="input" style={{width:72}} type="number" min={30} step={10} value={idleGap} onChange={(e)=>setIdleGap(Math.max(10, Number(e.target.value||60)))} />
@@ -2446,8 +5872,16 @@ const deathFlags = useMemo(() => {
             <label className="row" style={{gap:6}}>
               <span className="pill">Segments:</span>
               <select className="input" value={segIndex} onChange={e=>setSegIndex(Number(e.target.value))}>
-                <option value={-1}>— none —</option>
-                {segments.map((s, i)=>(<option key={i} value={i}>{s.label}</option>))}
+                <option value={-1}>Full log</option>
+                {[...segView.groups.entries()].map(([dungeon, items]) => (
+                  <optgroup key={dungeon} label={dungeon}>
+                    {items.map((s) => (
+                      <option key={s.i} value={s.i}>
+                        {s.dungeonShort ? `${s.dungeonShort} • ` : ''}{s.rangeText}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
               </select>
             </label>
 <div style={{ display:'flex', gap:12, alignItems:'center' }}>
@@ -2460,9 +5894,81 @@ const deathFlags = useMemo(() => {
 </div>
         </div>
 
-        <div style={{ padding:0, height:420, width:'100%' }}>
-          <ResponsiveContainer width="100%" height="100%" debounce={200}>
-            <LineChart onMouseLeave={() => { setFocusLine(null); scheduleHoverX(null); }} onMouseDown={(e:any)=>{ if(!e||e.activeLabel==null)return; setSelecting({x0:Number(e.activeLabel),x1:Number(e.activeLabel)}); }} onMouseMove={(e:any)=>{ if(e&&e.activeLabel!=null) scheduleHoverX(Number(e.activeLabel)); if(!selecting||!e||e.activeLabel==null) return; scheduleSelectingX1(Number(e.activeLabel)); }} onMouseUp={(e:any)=>{ if(!selecting) return; const {x0,x1}=selecting; setSelecting(null); if(Math.abs(x1-x0)>=1) commitWindow(x0,x1); }} onDoubleClick={()=> resetWindow()} data={top10Data} margin={{ top: 8, right: 20, left: 0, bottom: 0 }}>
+        {/* Timeline wrapper (no extra vertical slack) */}
+        <div style={{ padding:0, width:'100%', display:'flex', flexDirection:'column' }}>
+          {/* Main timeline */}
+          <div style={{ position:'relative', height:330, width:'100%' }}>
+            {hoverSummary && (
+              <div
+                style={{
+                  position:'absolute',
+                  right:12,
+                  top:10,
+                  zIndex:5,
+                  padding:'8px 10px',
+                  borderRadius:12,
+                  background:'linear-gradient(180deg, rgba(10,18,34,0.92) 0%, rgba(8,14,26,0.88) 100%)',
+                  border:'1px solid rgba(150,205,255,0.16)',
+                  boxShadow:'0 14px 28px rgba(0,0,0,0.45)',
+                  backdropFilter:'blur(10px)',
+                  pointerEvents:'none',
+                  minWidth: 210,
+                }}
+              >
+                <div style={{ display:'flex', justifyContent:'space-between', gap:10, marginBottom:6 }}>
+                  <div style={{ fontSize:12, fontWeight:950, color:'#d8ecff', letterSpacing:0.25 }}>
+                    {toMMSS(hoverSummary.t)}
+                  </div>
+                  {timelineMode === 'summary' ? (
+                    <div style={{ fontSize:11, color:'#7f9bc5', display:'flex', gap:10, flexWrap:'wrap', justifyContent:'flex-end' }}>
+                      <span style={{ color:'#8fd3ff' }}>Dmg {fmt0(hoverSummary.row?.dmg || 0)}</span>
+                      <span style={{ color:'#ff6b6b' }}>Taken {fmt0(hoverSummary.row?.taken || 0)}</span>
+                      <span style={{ color:'#19c37d' }}>Heal {fmt0(hoverSummary.row?.heal || 0)}</span>
+                      <span style={{ color:'#49e6a5' }}>Top8 Heal {fmt0(hoverSummary.row?.healTop8 || 0)}</span>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize:11, color:'#7f9bc5' }}>Total {fmt0(hoverSummary.total)}</div>
+                  )}
+                </div>
+                {/* Top-8 breakdown (damage dealers), with dmg/taken/heal columns */}
+                <div style={{ display:'grid', gridTemplateColumns:'1fr 84px 84px 84px', gap:8, fontSize:11, color:'#7f9bc5', marginTop:6, marginBottom:6 }}>
+                  <div>Player</div>
+                  <div style={{ textAlign:'right', color:'#8ecbff', fontWeight:800 }}>Dmg</div>
+                  <div style={{ textAlign:'right', color:'#ff93ab', fontWeight:800 }}>Taken</div>
+                  <div style={{ textAlign:'right', color:'#74f2c2', fontWeight:800 }}>Heal</div>
+                </div>
+
+                {(hoverSummary.breakdown || []).map((it: any, idx: number) => (
+                  <div key={idx} style={{ display:'grid', gridTemplateColumns:'1fr 84px 84px 84px', gap:8, fontSize:12, marginBottom:4 }}>
+                    <div style={{ minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', color:'#cfe7ff' }}>{it.name}</div>
+                    <div style={{ textAlign:'right', fontWeight:900, color:'#8ecbff' }}>{fmt0(it.dmg)}</div>
+                    <div style={{ textAlign:'right', fontWeight:900, color:'#ff93ab' }}>{fmt0(it.taken)}</div>
+                    <div style={{ textAlign:'right', fontWeight:900, color:'#74f2c2' }}>{fmt0(it.heal)}</div>
+                  </div>
+                ))}
+                <div style={{ marginTop:6, fontSize:11, color:'#6f86a8' }}>
+                  Drag to zoom • Double-click to reset
+                </div>
+              </div>
+            )}
+
+            <ResponsiveContainer width="100%" height="100%" debounce={200}>
+              <LineChart
+                onMouseLeave={() => { setFocusLine(null); scheduleHoverX(null); }}
+                onMouseDown={(e:any)=>{ if(!e||e.activeLabel==null)return; setSelecting({x0:Number(e.activeLabel),x1:Number(e.activeLabel)}); }}
+                onMouseMove={(e:any)=>{ if(e&&e.activeLabel!=null) scheduleHoverX(Number(e.activeLabel)); if(!selecting||!e||e.activeLabel==null) return; scheduleSelectingX1(Number(e.activeLabel)); }}
+                onMouseUp={(e:any)=>{ if(!selecting) return; const {x0,x1}=selecting; setSelecting(null); if(Math.abs(x1-x0)>=1) commitWindow(x0,x1); }}
+                onDoubleClick={()=> resetWindow()}
+                data={timelineMode === 'summary' ? (summaryData as any) : (top10Data as any)}
+                // Extra top margin so segment-band labels never clip
+                margin={{ top: 40, right: 44, left: 26, bottom: 0 }}
+              >
+                <defs>
+                  <linearGradient id="tlGlow" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="rgba(98,176,255,0.22)" />
+                    <stop offset="100%" stopColor="rgba(98,176,255,0)" />
+                  </linearGradient>
+                </defs>
               <CartesianGrid stroke="#1c2a3f" strokeDasharray="2 4" />
               <XAxis
                 dataKey="t"
@@ -2474,10 +5980,22 @@ const deathFlags = useMemo(() => {
               <YAxis
                 tickFormatter={(s)=>fmt0(s)}
                 stroke="#8aa8cf"
-                domain={[0, maxY * 1.05]}
+                domain={[0, (timelineMode === 'summary' ? maxYSummary : maxY) * 1.05]}
               />
-              <Tooltip content={(p: any) => <HolonetTimelineTooltip {...p} onFocus={setFocusLine} />} isAnimationActive={false} allowEscapeViewBox={{ x: true, y: true }} cursor={{ stroke: "rgba(170,220,255,0.55)", strokeDasharray: "3 4" }} />
+              <Tooltip content={() => null} wrapperStyle={{ display: 'none' }} cursor={false} isAnimationActive={false} />
+              <Customized component={renderSegBands} />
     
+              {timelineMode === 'summary' ? (
+                <>
+                  {/* WarcraftLogs-style summary lines */}
+                  <Line type="monotone" dataKey="dmg" name="Damage Done" stroke="#8fd3ff" strokeWidth={2.6} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="taken" name="Damage Taken" stroke="#ff6b6b" strokeWidth={2.6} dot={false} isAnimationActive={false} />
+                  {/* Healing line back to classic green */}
+                  <Line type="monotone" dataKey="heal" name="Healing Done" stroke="#19c37d" strokeWidth={2.6} dot={false} isAnimationActive={false} />
+				      <Line type="monotone" dataKey="healTop8" name="Top 8 Healing Done" stroke="#49e6a5" strokeWidth={2.6} dot={false} isAnimationActive={false} />
+                </>
+              ) : (
+                <>
               {/* Top-10 per-player lines */}
               {top10Series.map(({ name, color }) => {
                 const selected = (name === pA || name === pB);
@@ -2552,22 +6070,41 @@ const deathFlags = useMemo(() => {
   />
 ))}
 
-{selecting && (
-  <ReferenceArea
-    x1={Math.max(selecting.x0, selecting.x1)}
-    x2={Math.min(selecting.x0, selecting.x1)}
-    strokeOpacity={0}
-    fill="rgba(33,212,253,0.12)"
-  />
-)}
-{hoverX != null && !selecting && (
-  <ReferenceLine x={hoverX} stroke="#62b0ff" strokeDasharray="3 3" />
-)}
+                </>
+              )}
 
-{selecting && (<ReferenceArea x1={Math.max(selecting.x0, selecting.x1)} x2={Math.min(selecting.x0, selecting.x1)} strokeOpacity={0} fill="rgba(33,212,253,0.12)" />)}
-{hoverX != null && !selecting && (<ReferenceLine x={hoverX} stroke="#62b0ff" strokeDasharray="3 3" />)}
-</LineChart>
-          </ResponsiveContainer>
+                {selecting && (
+                  <ReferenceArea
+                    x1={Math.max(selecting.x0, selecting.x1)}
+                    x2={Math.min(selecting.x0, selecting.x1)}
+                    strokeOpacity={0}
+                    fill="rgba(33,212,253,0.12)"
+                  />
+                )}
+                {hoverX != null && !selecting && (
+                  <ReferenceLine x={hoverX} stroke="#62b0ff" strokeDasharray="3 3" />
+                )}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* (Removed) Overview + Brush */}
+        </div>
+      </div>
+
+
+      {/* Parsing export button (copies a shareable snapshot to clipboard) */}
+      <div className="exportWrap">
+        <div style={{ display:'flex', flexDirection:'column', alignItems:'center' }}>
+          <button className="exportBtn" onClick={handleParsingExport} disabled={exporting || !segments?.length || !exportReady}>
+            <span style={{ fontSize: 14, lineHeight: 1 }}>📸</span>
+            {exporting ? "Exporting…" : (exportReady ? "Copy Parsing Export" : "Preparing Export…")}
+          </button>
+          <div className="exportSub">
+            {exportToast ?? (exportReady
+              ? "Copies a shareable snapshot (Damage / Healing / APM by segment) to your clipboard."
+              : "Finishing class-color & segment prep… (export will enable automatically)")}
+          </div>
         </div>
       </div>
 
@@ -2576,14 +6113,15 @@ const deathFlags = useMemo(() => {
         <button className={"tab" + (mode==='sources'?' active':'')} onClick={()=>setMode('sources')}>Sources</button>
         <button className={"tab" + (mode==='abilities'?' active':'')} onClick={()=>setMode('abilities')}>Abilities</button>
         <button className={"tab" + (mode==='statistics'?' active':'')} onClick={()=>setMode('statistics')}>Statistics</button>
+        <button className={"tab" + (mode==='damageTaken'?' active':'')} onClick={()=>setMode('damageTaken')}>Damage Taken</button>
       </div>
 
       {mode==='sources' ? (
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, marginTop:16 }}>
-          {renderPanel('Damage Done By Source', listDamage, rows, 'Damage Dealt', mode, { label: 'Total Combat Damage Output (points)', tooltip: 'Sum of damage inflicted while in combat. Use this to compare raw output by source across the encounter. Totals reflect combat activity (not downtime) when the log provides it.' }, inferredClasses, pickFromChart)}
-          {renderPanel('Healing Done By Source', listHealing, rows, 'Healing Done', mode, { label: 'Total Healing Delivered (points)', tooltip: 'Total healing events attributed to the source. Includes effective healing captured in the log (and any overheal if present). Useful for identifying primary sustain and burst recovery.' }, inferredClasses, pickFromChart)}
-          {renderPanel(`Damage Taken By Source${(compareOn && (pA||pB)) ? ' — ' + (pA||pB) : ''}`, takenFor, rows, 'Damage Taken', mode, { label: 'Incoming Damage Sustained (points)', tooltip: 'Total hostile damage received. High values often indicate frontline duty, focus fire, or tanking responsibility — not necessarily poor play. Compare alongside deaths and heals received.' }, inferredClasses)}
-          {renderPanel('Actions per Minute (APM)', listAPM, rows, 'APM', mode, { label: 'Actions per Minute (actions/min)', tooltip: 'How frequently abilities/actions were performed during combat. Higher APM generally means higher activity/uptime, but role matters (supports/controllers spike during key windows).' }, inferredClasses)}
+          {renderPanel('Damage Done By Source', listDamage, rowsPlayers, 'Damage Dealt', mode, { label: 'Total Combat Damage Output (points)', tooltip: 'Sum of damage inflicted while in combat. Use this to compare raw output by source across the encounter. Totals reflect combat activity (not downtime) when the log provides it.' }, inferredClasses, undefined, pickFromChart)}
+          {renderPanel('Healing Done By Source', listHealing, rowsPlayers, 'Healing Done', mode, { label: 'Total Healing Delivered (points)', tooltip: 'Total healing events attributed to the source. Includes effective healing captured in the log . Useful for identifying primary sustain and burst recovery.' }, inferredClasses, healingTooltipContent, pickFromChart)}
+          {renderPanel(`Damage Taken By Source${(compareOn && (pA||pB)) ? ' — ' + (pA||pB) : ''}`, takenFor, rowsPlayers, 'Damage Taken', mode, { label: 'Incoming Damage Sustained (points)', tooltip: 'Total hostile damage received. High values often indicate frontline duty, focus fire, or tanking responsibility — not necessarily poor play. Compare alongside deaths and heals received.' }, inferredClasses)}
+          {renderPanel('Actions per Minute (APM)', listAPM, rowsPlayers, 'APM', mode, { label: 'Actions per Minute (actions/min)', tooltip: 'How frequently abilities/actions were performed during combat. Higher APM generally means higher activity/uptime, but role matters (supports/controllers spike during key windows).' }, inferredClasses, apmTooltipContent, pickFromChart)}
         </div>
       ) : mode==='abilities' ? (
         <div className="card abilitiesCard" style={{ marginTop:16 }}>
@@ -2593,7 +6131,7 @@ const deathFlags = useMemo(() => {
               <span className="pill">Click a bar to pick A (Shift+Click for B). Abilities show A (or top player).</span>
             </div>
           </div>
-          <div ref={abilitiesScrollRef} onScroll={onAbilitiesScroll} className="abilitiesScroll" style={{ padding:14, overflow:'auto' }}>
+          <div ref={abilitiesScrollRef} onScroll={onAbilitiesScroll} className="abilitiesScroll scrollArea" style={{ padding:14, overflow:'auto' }}>
             <table className="table abilitiesTable">
               <thead>
                 <tr>
@@ -2797,6 +6335,664 @@ const deathFlags = useMemo(() => {
                          </table>
           </div>
         </div>
+      ) : mode==='damageTaken' ? (
+        <div style={{ display:'grid', gap:16, marginTop:16 }}>
+          {/* Top row: snapshot + event feed */}
+          <div style={{ display:'grid', gridTemplateColumns:'1.35fr 1fr', gap:16 }}>
+            <div className="card death-snapshot-card" style={{ padding:14 }}>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
+                <div style={{ fontSize:13, fontWeight:900, letterSpacing:.35, color:'#9fb7d8' }}>
+                  Death Snapshot (last {DEATH_SNAPSHOT_SEC}s){selectedDeath ? ` — ${toMMSS(selectedDeath.t)}` : ''}
+                </div>
+
+                <div style={{ display:'flex', gap:10, alignItems:'center' }}>
+                  {deathsForPrimary.length > 1 && (
+                    <select
+                      value={selectedDeathKey}
+                      onChange={(e)=>setSelectedDeathKey(e.target.value)}
+                      className="holoDeathSelect"
+                      style={{ height:28, padding:'0 10px', fontSize:12 }}
+                      title="Choose a death to inspect"
+                    >
+                      {deathsForPrimary.map((d, i) => {
+                        const key = String(d.t);
+                        // best-effort killer name from last dmg event near the death time
+                        const killerGuess = (() => {
+                          const who = normalizeActorName(canonEntity(primaryPlayer));
+                          const last = damageEvents
+                            .filter(e => canonEntity(e.dst)===who && e.t <= d.t && e.t >= Math.max(0, d.t - 2))
+                            .sort((a,b)=>b.t-a.t)[0];
+                          return last ? canonDyn(last.src) : '—';
+                        })();
+                        return (
+                          <option key={key} value={key}>
+                            #{i+1} — {toMMSS(d.t)} — {killerGuess}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  )}
+
+                  <div className="pill" style={{ fontSize:11 }}>
+                    Damage: {fmt0(deathSnap?.totalDmg||0)}
+                  </div>
+                  <div className="pill" style={{ fontSize:11 }}>
+                    Heals: {fmt0(deathSnap?.totalHeal||0)}
+                  </div>
+                  <div className="pill" style={{ fontSize:11 }}>
+                    Utility: {deathSnap?.util?.length ? `${deathSnap.util.length} used` : 'none'}
+                  </div>
+                  <div className="pill" style={{ fontSize:11 }}>
+                    Killing blow: {deathSnap?.killing ? `${fmt0(deathSnap.killing.amount)} (${canonDyn(deathSnap.killing.src)})` : '—'}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 14,
+                padding: '6px 8px 2px',
+                marginTop: 2,
+                color: '#a8c6e8',
+                fontSize: 12,
+                userSelect: 'none'
+              }}>
+                <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
+                  <span style={{ width:10, height:10, borderRadius:2, background:'#62b0ff', opacity:0.75, boxShadow:'0 0 10px rgba(98,176,255,0.25)' }} />
+                  Heals
+                </span>
+                <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
+                  <span style={{ width:10, height:10, borderRadius:2, background:'#ff5a6f', opacity:0.75, boxShadow:'0 0 10px rgba(255,90,111,0.22)' }} />
+                  Damage
+                </span>
+                <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
+                  <span style={{ width:18, height:0, borderTop:'2px solid #7fc6ff', boxShadow:'0 0 10px rgba(127,198,255,0.22)' }} />
+                  HP remaining
+                </span>
+                <span style={{ opacity:0.85 }}>Second</span>
+              </div>
+
+              <div style={{ height:260, width:'100%' }}>
+                {deathSnap ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={deathSnap.chartSeries} margin={{ top: 10, right: 18, left: 10, bottom: 10 }}>
+                      <CartesianGrid strokeDasharray="3 3" opacity={0.35} />
+                      <XAxis
+                        dataKey="x"
+                        type="number"
+                        domain={[0, DEATH_SNAPSHOT_SEC]}
+                        ticks={Array.from({ length: DEATH_SNAPSHOT_SEC + 1 }, (_, i) => i)}
+                        tickFormatter={(v)=>`${Number(v).toFixed(0)}s`}
+                      />
+
+                      <YAxis
+                        yAxisId="hp"
+                        orientation="left"
+                        domain={[0, deathSnap.startHP]}
+                        tickFormatter={(v)=>fmt0(Number(v))}
+                      />
+                      <YAxis
+                        yAxisId="evt"
+                        orientation="right"
+                        domain={[-deathSnap.maxEvt, deathSnap.maxEvt]}
+                        tickFormatter={(v)=>fmt0(Math.abs(Number(v)))}
+                      />
+
+                      <Tooltip content={() => null} wrapperStyle={{ display: 'none' }} cursor={false} isAnimationActive={false} />
+
+                                            <ReferenceLine yAxisId="evt" y={0} stroke="#7aa6d6" strokeDasharray="3 3" />
+                      {/* NOTE: This chart declares custom Y axes (hp / evt). Recharts defaults
+                         ReferenceLine/ReferenceArea to yAxisId=0 if unspecified, which throws.
+                         Keep these markers pinned to the hp axis. */}
+                      <ReferenceArea yAxisId="hp" x1={DEATH_SNAPSHOT_SEC - 1} x2={DEATH_SNAPSHOT_SEC} fillOpacity={0.06} />
+                      <ReferenceLine
+                        yAxisId="hp"
+                        x={DEATH_SNAPSHOT_SEC}
+                        stroke="#ff5a6f"
+                        strokeDasharray="4 4"
+                        label={{
+                          value: deathSnap.killing
+                            ? `Killing blow: ${fmt0(deathSnap.killing.amount)} • ${canonDyn(deathSnap.killing.src)}`
+                            : 'Death',
+                          position: 'insideTopRight',
+                          fill: '#ff8ea0',
+                          fontSize: 11,
+                          fontWeight: 700
+                        }}
+                      />
+
+                      <Bar yAxisId="evt" dataKey="heal" name="Heals" fill="#62b0ff" opacity={0.35} barSize={14} minPointSize={2} />
+                      <Bar yAxisId="evt" dataKey="dmg" name="Damage" fill="#ff5a6f" opacity={0.35} barSize={14} minPointSize={2} />
+
+                      <Line yAxisId="hp" type="monotone" dataKey="hp" name="HP remaining" stroke="#7fc6ff" strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 4 }} />
+
+                      {deathSnap.healLabels?.length ? (
+                        <Scatter data={deathSnap.healLabels} dataKey="y" yAxisId="hp" fill="#62b0ff" name="Second" legendType="none">
+                          <LabelList
+                            dataKey="who"
+                            content={(props:any) => {
+                              const { x, y, value, index } = props;
+                              if (x == null || y == null || !value) return null;
+                              const txt = String(value);
+                              const maxLen = 12;
+                              const parts: string[] = [];
+                              for (let i = 0; i < txt.length; i += maxLen) parts.push(txt.slice(i, i + maxLen));
+                              const dy = -12 - ((index || 0) % 2) * 10;
+                              return (
+                                <text
+                                  x={x}
+                                  y={y + dy}
+                                  textAnchor="middle"
+                                  fontSize={11}
+                                  fontWeight={800}
+                                  fill="#62b0ff"
+                                  stroke="rgba(0,0,0,0.65)"
+                                  strokeWidth={3}
+                                  paintOrder="stroke"
+                                >
+                                  {parts.map((p, i) => (
+                                    <tspan key={i} x={x} dy={i === 0 ? 0 : 12}>{p}</tspan>
+                                  ))}
+                                </text>
+                              );
+                            }}
+                          />
+                        </Scatter>
+                      ) : null}
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div style={{ height:'100%', display:'flex', alignItems:'center', justifyContent:'center', color:'#92a8c8', fontSize:12 }}>
+                    {primaryPlayer ? 'No deaths in the current window.' : 'Select a player (A) to view a death snapshot.'}
+                  </div>
+                )}
+              </div>
+
+
+              {deathSnap ? (
+                <div style={{
+                  marginTop:10,
+                  paddingTop:10,
+                  borderTop:'1px solid rgba(140,185,255,0.14)'
+                }}>
+                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:8 }}>
+                    <div style={{ fontSize:12, fontWeight:900, letterSpacing:.3, color:'#a9c1e6' }}>
+                      Per-second breakdown
+                    </div>
+                    <div style={{ fontSize:11, color:'#7f9bc5' }}>
+                      10 bins (T-10s → T-1s)
+                    </div>
+                  </div>
+
+                  <div style={{
+                    display:'grid',
+                    gridTemplateColumns:`repeat(${DEATH_SNAPSHOT_SEC}, minmax(0, 1fr))`,
+                    gap:8,
+                    width:'100%',
+                    overflowX:'auto',
+                    paddingBottom:2
+                  }}>
+                    {Array.from({ length: DEATH_SNAPSHOT_SEC }, (_, i) => {
+                      const row: any = deathSnap.chartSeries?.[i] ?? {};
+                      const dmgAbs = Math.abs(Number(row.dmg) || 0);
+                      const heal = Number(row.heal) || 0;
+
+                      const hb: Record<string, number> = row.healBy ?? {};
+                      const db: Record<string, number> = row.dmgBy ?? {};
+                      const topHeal = Object.entries(hb).sort((a,b)=> (b[1] as number) - (a[1] as number))[0];
+                      const topDmg  = Object.entries(db).sort((a,b)=> (b[1] as number) - (a[1] as number))[0];
+
+                      return (
+                        <div
+                          key={i}
+                          onMouseEnter={() => setDeathBinHover(i)}
+                          onMouseLeave={() => setDeathBinHover((h) => (h === i ? null : h))}
+                          style={{
+                            position: 'relative',
+                            borderRadius: 12,
+                            padding: '10px 10px 8px',
+                            background:
+                              'linear-gradient(180deg, rgba(14,24,44,0.72) 0%, rgba(10,18,34,0.52) 100%)',
+                            border: '1px solid rgba(130,180,255,0.14)',
+                            boxShadow: '0 10px 24px rgba(0,0,0,0.22) inset',
+                            minWidth: 0,
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'baseline',
+                              marginBottom: 8,
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontSize: 12,
+                                fontWeight: 950,
+                                color: '#cfe2ff',
+                                letterSpacing: 0.25,
+                              }}
+                            >
+                              T-{DEATH_SNAPSHOT_SEC - i}s
+                            </div>
+                            <div style={{ fontSize: 11, color: '#7f9bc5' }}>
+                              {i + 1}/{DEATH_SNAPSHOT_SEC}
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                            <div
+                              style={{
+                                borderRadius: 10,
+                                padding: '8px 8px 7px',
+                                border: '1px solid rgba(114,200,255,0.16)',
+                                background: 'rgba(18,34,56,0.45)',
+                                minWidth: 0,
+                              }}
+                            >
+                              <div style={{ fontSize: 11, color: '#88a7d6', marginBottom: 2 }}>
+                                Heals
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: 16,
+                                  fontWeight: 950,
+                                  color: '#7fd0ff',
+                                  lineHeight: 1.1,
+                                }}
+                              >
+                                {fmt0(heal)}
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: 10,
+                                  color: '#6f8fbf',
+                                  marginTop: 4,
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                }}
+                              >
+                                {topHeal ? `${topHeal[0]} (${fmt0(topHeal[1] as number)})` : '—'}
+                              </div>
+                            </div>
+
+                            <div
+                              style={{
+                                borderRadius: 10,
+                                padding: '8px 8px 7px',
+                                border: '1px solid rgba(255,120,150,0.16)',
+                                background: 'rgba(44,18,30,0.32)',
+                                minWidth: 0,
+                              }}
+                            >
+                              <div style={{ fontSize: 11, color: '#cba0b0', marginBottom: 2 }}>
+                                Damage
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: 16,
+                                  fontWeight: 950,
+                                  color: '#ff8aa6',
+                                  lineHeight: 1.1,
+                                }}
+                              >
+                                {fmt0(dmgAbs)}
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: 10,
+                                  color: '#a98a9a',
+                                  marginTop: 4,
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                }}
+                              >
+                                {topDmg ? `${topDmg[0]} (${fmt0(topDmg[1] as number)})` : '—'}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div
+                            style={{
+                              marginTop: 8,
+                              height: 6,
+                              borderRadius: 999,
+                              overflow: 'hidden',
+                              background: 'rgba(120,160,220,0.14)',
+                              border: '1px solid rgba(140,185,255,0.10)',
+                            }}
+                          >
+                            {/* simple holonet “signal” bar: heal (left) vs damage (right) */}
+                            {(() => {
+                              const max = Math.max(1, Math.max(heal, dmgAbs));
+                              const hPct = Math.min(100, (heal / max) * 100);
+                              const dPct = Math.min(100, (dmgAbs / max) * 100);
+                              return (
+                                <div style={{ display: 'flex', width: '100%', height: '100%' }}>
+                                  <div
+                                    style={{
+                                      width: `${hPct}%`,
+                                      height: '100%',
+                                      background: 'rgba(120,210,255,0.75)',
+                                    }}
+                                  />
+                                  <div
+                                    style={{
+                                      width: `${dPct}%`,
+                                      height: '100%',
+                                      background: 'rgba(255,120,150,0.70)',
+                                    }}
+                                  />
+                                  <div style={{ flex: 1 }} />
+                                </div>
+                              );
+                            })()}
+                          </div>
+
+                          {deathBinHover === i ? (
+                            <DeathSecondHoverPopup
+                              i={i}
+                              secondsTotal={DEATH_SNAPSHOT_SEC}
+                              hb={hb}
+                              db={db}
+                              fmt0={fmt0}
+                            />
+                          ) : null}
+                        </div>
+                      );
+
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              <div style={{ marginTop:8, fontSize:11, color:'#87a0c6' }}>
+                HP remaining is estimated (forced to hit 0 at death). Bars show per-second heals (up) and damage (down).
+              </div>
+            </div>
+
+            <div className="card" style={{ padding:14 }}>
+              <div style={{ fontSize:13, fontWeight:900, letterSpacing:.35, color:'#9fb7d8', marginBottom:10 }}>
+                Event Feed
+              </div>
+
+              <div className="scrollArea" style={{ maxHeight:360, overflow:'auto', paddingLeft:24, paddingRight:28, scrollbarGutter:'stable both-edges' }}>
+                {deathSnap?.feed?.length ? deathSnap.feed.slice(0, 60).map((e:any, i:number) => {
+                  const rel = deathWindow ? (deathWindow.end - e.t) : 0;
+                  const tLabel = `T-${rel.toFixed(2)}s`;
+                  const kind = e.kind;
+                  const badge =
+                    kind==='damage' ? { bg:'rgba(255,90,111,.18)', fg:'#ff9aaa', label:'DMG' } :
+                    kind==='heal' ? { bg:'rgba(98,176,255,.16)', fg:'#9fd0ff', label:'HEAL' } :
+                    { bg:'rgba(180,160,255,.14)', fg:'#cabdff', label:'UTIL' };
+
+                  const isKill = kind==='damage' && deathSnap.killing && e.t === deathSnap.killing.t && e.amount === deathSnap.killing.amount;
+
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        display:'grid',
+                        gridTemplateColumns:'70px 56px 1fr 110px',
+                        gap:10,
+                        alignItems:'center',
+                        padding:'10px 10px',
+                        border:'1px solid rgba(120,160,210,.12)',
+                        borderRadius:12,
+                        marginBottom:8,
+                        background: isKill ? 'rgba(255,90,111,.08)' : 'rgba(0,0,0,0.08)'
+                      }}
+                    >
+                      <div style={{ fontSize:11, color:'#9ab2d8', fontWeight:800 }}>{tLabel}</div>
+
+                      <div style={{
+                        justifySelf:'start',
+                        fontSize:11,
+                        fontWeight:900,
+                        padding:'4px 8px',
+                        borderRadius:999,
+                        background: badge.bg,
+                        color: badge.fg,
+                        letterSpacing:.6
+                      }}>
+                        {badge.label}
+                      </div>
+
+                      <div style={{ minWidth:0 }}>
+                        <div style={{ fontSize:12, color:'#d7e6ff', fontWeight:800, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                          {collapseAbility(e.ability)}
+                        </div>
+                        <div style={{ fontSize:11, color:'#8ea7cc', marginTop:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                          {canonDyn(e.src)} → {canonEntity(e.dst)}
+                          {kind==='utility' ? ' (used)' : ''}
+                        </div>
+                      </div>
+
+                      <div style={{ textAlign:'right', fontSize:13, fontWeight:900, color: kind==='damage' ? '#ffb1bc' : kind==='heal' ? '#bfe0ff' : '#d7d0ff' }}>
+                        {kind==='utility' ? '—' : fmt0(e.amount)}
+                      </div>
+                    </div>
+                  );
+                }) : (
+                  <div style={{ color:'#92a8c8', fontSize:12 }}>
+                    {primaryPlayer ? 'No death feed available.' : 'Select a player (A) to view events.'}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+
+          {/* KPI row for Damage Taken */}
+          <div className="kpi-grid">
+            <div className="card kpi-card" style={{ padding:14 }}>
+              <div className="kpi-accent" />
+              <div className="kpi-title">Total Damage Taken</div>
+              <div className="kpi-value mono">{fmt0(damageTakenKpisForPrimary.totalDamage)}</div>
+              <div className="kpi-sub">Based on {fmt0(damageTakenKpisForPrimary.totalCount)} incoming hits</div>
+            </div>
+
+            <div className="card kpi-card" style={{ padding:14 }}>
+              <div className="kpi-title">Elemental Split</div>
+              <div style={{ marginTop:10, display:'flex', flexWrap:'wrap', gap:8, justifyContent:'center' }}>
+                {Object.entries(damageTakenKpisForPrimary.elem)
+                  .sort((a,b)=>(b[1] as number)-(a[1] as number))
+                  .slice(0, 6)
+                  .map(([k,v]) => {
+                    const ratio = damageTakenKpisForPrimary.totalDamage ? (Number(v||0) / damageTakenKpisForPrimary.totalDamage) : 0;
+                    return (
+                      <span key={k} className="elemPill elemSplitPillSmall" data-elem={titleCase(k)}>
+                        {titleCase(k)} {fmtPctElem(ratio)}
+                      </span>
+                    );
+                  })}
+              </div>
+              <div style={{ fontSize:11, color:'#6f8db8', marginTop:10 }}>
+                % of total incoming damage by element
+              </div>
+            </div>
+
+            <div className="card kpi-card" style={{ padding:14 }}>
+              <div className="kpi-title">Avg Armor Mitigation</div>
+              <div className="kpi-value mono">
+                {fmtPct(damageTakenKpisForPrimary.avgAbsorbedPct)}
+              </div>
+              <div className="kpi-sub">
+                {fmt0(damageTakenKpisForPrimary.avgAbsorbed)} avg absorbed pts (hits with absorption)
+              </div>
+            </div>
+
+            <div className="card kpi-card" style={{ padding:14 }}>
+              <div className="kpi-title">Mitigated vs Unmitigated</div>
+              <div style={{ display:'flex', justifyContent:'space-between', gap:12, marginTop:10 }}>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:11, color:'#6f8db8', fontWeight:800 }}>Mitigated</div>
+                  <div style={{ fontSize:22, fontWeight:950 }} className="mono">{fmtPct(damageTakenKpisForPrimary.mitigatedRatio)}</div>
+                </div>
+                <div style={{ width:1, background:'rgba(128,160,210,.25)' }} />
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:11, color:'#6f8db8', fontWeight:800 }}>Unmitigated</div>
+                  <div style={{ fontSize:22, fontWeight:950 }} className="mono">{fmtPct(damageTakenKpisForPrimary.unmitigatedRatio)}</div>
+                </div>
+              </div>
+              <div style={{ fontSize:11, color:'#6f8db8', marginTop:6 }}>
+                Mitigated = dodge/parry/block/glance/evade
+              </div>
+            </div>
+          </div>
+
+          {/* Bottom row: top attackers + incoming by ability */}
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+            <div className="card" style={{ padding:14 }}>
+              <div style={{ fontSize:13, fontWeight:900, letterSpacing:.35, color:'#9fb7d8', marginBottom:10 }}>
+                Top Attackers
+              </div>
+
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:8 }}>
+  <div style={{ fontSize:11, color:'#7fa0ca' }}>
+    Showing <span className="mono" style={{ color:'#cfe9ff', fontWeight:900 }}>{topAttackersForPrimary.length}</span> attackers
+  </div>
+  <div style={{ fontSize:11, color:'#6f8db8' }}>Hover bars for details</div>
+</div>
+
+<div className="scrollArea" style={{ maxHeight:320, overflow:'auto', paddingRight:6, paddingLeft:6 }}>
+  <div style={{ height: Math.max(300, topAttackersForPrimary.length * 44) }}>
+    <ResponsiveContainer width="100%" height="100%">
+      <BarChart
+        layout="vertical"
+        data={topAttackersForPrimary}
+        margin={{ top: 18, right: 180, left: 140, bottom: 16 }}
+        barCategoryGap={18}
+      >
+        <CartesianGrid strokeDasharray="3 3" opacity={0.22} />
+        <XAxis type="number" tickFormatter={fmt0} padding={{ right: 24 }} tick={{ fontSize: 13, fill: 'rgba(220,245,255,.72)' }} axisLine={false} tickLine={false} />
+        <YAxis
+          type="category"
+          dataKey="name"
+          width={150}
+          tick={{ fontSize: 14, fill: 'rgba(230,250,255,.92)', fontWeight: 900 }}
+          tickMargin={14}
+          axisLine={false}
+          tickLine={false}
+          interval={0}
+          tickFormatter={(v:any) => {
+            const s = String(v ?? '');
+            return s.length > 24 ? s.slice(0, 24) + '…' : s;
+          }}
+        />
+        <Tooltip
+          cursor={{ fill: 'rgba(130, 220, 255, 0.06)' }}
+          content={({ active, payload }: any) => {
+            if (!active || !payload?.length) return null;
+            const p = payload[0];
+            const name = String(p?.payload?.name ?? '');
+            const val = Number(p?.value || 0);
+            const pct = topAttackersTotalForPrimary ? (val / topAttackersTotalForPrimary) : 0;
+
+            return (
+              <div style={{
+                pointerEvents:'none',
+                padding:'10px 12px',
+                borderRadius:12,
+                background:'linear-gradient(180deg, rgba(10, 26, 46, 0.96), rgba(7, 16, 30, 0.92))',
+                border:'1px solid rgba(120, 220, 255, 0.28)',
+                boxShadow:'0 18px 40px rgba(0,0,0,0.45), 0 0 16px rgba(70, 190, 255, 0.10)',
+                color:'rgba(220,245,255,0.96)',
+                minWidth:220,
+              }}>
+                <div style={{ fontSize:12, fontWeight:900, letterSpacing:'.06em', textTransform:'uppercase' }}>Attacker</div>
+                <div style={{ fontSize:14, fontWeight:950, marginTop:4 }}>{name}</div>
+                <div style={{ display:'flex', justifyContent:'space-between', gap:12, marginTop:8 }}>
+                  <div>
+                    <div style={{ fontSize:11, color:'#7fa0ca', fontWeight:800 }}>Damage</div>
+                    <div className="mono" style={{ fontSize:18, fontWeight:950 }}>{fmt0(val)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:11, color:'#7fa0ca', fontWeight:800 }}>Share</div>
+                    <div className="mono" style={{ fontSize:18, fontWeight:950 }}>{fmtPct(pct)}</div>
+                  </div>
+                </div>
+              </div>
+            );
+          }}
+        />
+        <Bar
+          dataKey="value"
+          barSize={24}
+          radius={[12, 12, 12, 12]}
+          background={{ fill: 'rgba(255,255,255,0.04)' }}
+          isAnimationActive={false}
+        >
+          {topAttackersForPrimary.map((d:any, i:number) => (
+            <Cell key={i} fill={classColor(inferredClasses?.[d.name] || '')} opacity={0.92} />
+          ))}
+          <LabelList dataKey="value" content={renderTopAttackerValueLabel} />
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  </div>
+</div>
+            </div>
+
+            <div className="card" style={{ padding:14 }}>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
+                <div style={{ fontSize:13, fontWeight:900, letterSpacing:.35, color:'#9fb7d8' }}>
+                  Incoming Damage By Ability
+                </div>
+                <div style={{ fontSize:11, color:'#89a3c8' }}>Element • ST% • D/P/B counts</div>
+              </div>
+
+              <div className="scrollArea" style={{ maxHeight:260, overflow:'auto' }}>
+                <table className="table incomingTable mono" style={{ width:'100%' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign:'left' }}>Ability</th>
+                      <th>Elem</th>
+                      <th>Hits</th>
+                      <th>Damage</th>
+                      <th>Avg</th>
+                      <th>Max</th>
+                      <th>Crit%</th>
+                      <th>Glance%</th>
+                      <th>ST%</th>
+                      <th>D</th>
+                      <th>P</th>
+                      <th>B</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {incomingByAbilityForPrimary.slice(0, 80).map((r:any, i:number) => (
+                      <tr key={i}>
+                        <td style={{ textAlign:'left', maxWidth:240, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }} title={r.ability}>{r.ability}</td>
+                        <td><span className="elemPill" data-elem={r.elemTop}>{r.elemTop}</span></td>
+                        <td>{fmt0(r.hits)}</td>
+                        <td>{fmt0(r.damage)}</td>
+                        <td>{fmt0(r.avg)}</td>
+                        <td>{fmt0(r.max)}</td>
+                        <td>{fmtPct(r.critPct)}</td>
+                        <td>{fmtPct(r.glancePct)}</td>
+                        <td>{fmtPct(r.stPct)}</td>
+                        <td>{fmt0(r.dodge)}</td>
+                        <td>{fmt0(r.parry)}</td>
+                        <td>{fmt0(r.block)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div style={{ marginTop:8, fontSize:11, color:'#87a0c6' }}>
+                ST% = strikethrough rate observed on incoming hits. D/P/B are counts in the current window.
+              </div>
+            </div>
+          </div>
+        </div>
+      
       ) : (
         /* ===================== Statistics tab ===================== */
         <StatisticsTab
@@ -2941,9 +7137,10 @@ function renderPanel(
   tabKey: string,
   axisFooter?: AxisFooterSpec,
   inferredClasses: Record<string, string> = {},
+  tooltipContent?: any,
   onPick?: (name: string, ev?: any) => void,
 ) {
-  return <div className="card holo-panel">
+  return <div className="card holo-panel" data-holo-card="1" data-holo-card-id={`${tabKey}:${seriesName}`}>
     <div className="abilitiesHeader" style={{ padding:'12px 14px', borderBottom:'1px solid #1b2738', display:'flex', justifyContent:'space-between' }}>
       <div style={{ fontSize:13, fontWeight:800, color:'#9fb7d8', letterSpacing:.3, display:'flex', alignItems:'center', gap:8 }}>
         <span className="holoDot" aria-hidden="true" />
@@ -2968,7 +7165,12 @@ function renderPanel(
                  width={Math.max(160, Math.min(360, 16 + list.reduce((m,i)=>Math.max(m,(i.name||'').length),0)*8))}
                  interval={0} tick={{ fill: "#cfe3ff", fontSize: 12 }} tickLine={false} axisLine={false} />
           <XAxis type="number" tickFormatter={(v:number)=> fmt0(v)} tick={{ fill: "#9bb7df" }} />
-          <Tooltip isAnimationActive={false} formatter={(v:number)=> fmt0(v)} labelFormatter={(l)=> l as string} />
+          {tooltipContent ? (
+            <Tooltip isAnimationActive={false} content={tooltipContent} wrapperStyle={{ zIndex: 99999, pointerEvents: 'none' }} allowEscapeViewBox={{ x: true, y: true }} />
+          ) : (
+            <Tooltip isAnimationActive={false} formatter={(v:number)=> fmt0(v)} labelFormatter={(l)=> l as string} wrapperStyle={{ zIndex: 99999, pointerEvents: 'none' }} allowEscapeViewBox={{ x: true, y: true }} />
+          )}
+
           <Bar
             dataKey="value"
             name={seriesName}

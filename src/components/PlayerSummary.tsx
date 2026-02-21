@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-type DamageEvent = { t: number; src: string; ability: string; amount: number; flags?: string };
+type DamageEvent = { t: number; src: string; ability: string; amount: number; flags?: string; blocked?: number };
 type HealEvent = { t: number; src: string; ability?: string; amount: number };
 type UtilityEvent = { t: number; src: string; ability: string };
 type DeathEvent = { t: number; name: string };
@@ -53,13 +53,20 @@ const fmtTime = (sec: number) => {
   return `${m}:${String(r).padStart(2, "0")}`;
 };
 
-const normalizeAbility = (s: string) =>
-  (s || "")
-    .toLowerCase()
-    .replace(/\(.*?\)/g, "") // drop parenthetical suffixes like (Mark 3)
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+const normalizeAbility = (raw: string) => {
+  if (!raw) return "";
+  let s = String(raw).toLowerCase().trim();
+  // Drop parenthetical/bracketed suffixes like "(Mark 3)"
+  s = s.replace(/[\(\[][^)\]]*[\)\]]/g, "");
+  // Remove rank/mark/roman numerals/numeric tokens to align with parser normalization
+  s = s.replace(/\bmark\s*\d+\b/gi, "");
+  s = s.replace(/\b[ivxlcdm]+\b/gi, "");
+  s = s.replace(/\b\d+\b/g, "");
+  // Normalize punctuation/spacing
+  s = s.replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+  return s;
+};
+
 
 const canonPlayer = (s: string) => (s || "").replace(/'+$/g, "").trim();
 
@@ -283,7 +290,7 @@ const isIncomingDamage = (e: { ability?: string; flags?: string; amount?: number
       deaths: number;
       uptime: number;
       activeSeconds: number;
-      topAbilities: Array<{ ability: string; dmg: number; share: number; critPct: number; pctOfTotal: number }>;
+      topAbilities: Array<{ ability: string; dmg: number; share: number; critPct: number; strikeThroughPct: number; strikeThroughValue: number; pctOfTotal: number }>;
       utilities: Array<{ ability: string; count: number; uptime: number; uptimePct: number }>;
       utilityCount: number;
     }> = {};
@@ -427,25 +434,39 @@ const isIncomingDamage = (e: { ability?: string; flags?: string; amount?: number
         .sort((a, b) => b.dmg - a.dmg)
         ;
 
-      // Precompute crit damage per normalized ability for this player
-      const critByKey = new Map<string, { dmg: number; critDmg: number }>();
+            // Precompute per-ability hit stats (crit rate + strikethrough rate/value) for this player
+      // IMPORTANT: normalizeAbility() must match the worker's normalization (it strips ranks like "Focused Beam 6"),
+      // otherwise per-hit flags won't line up with perAbility keys.
+      const statsByKey = new Map<string, { hits: number; critHits: number; stHits: number; blockedTotal: number; evadedTotal: number }>();
       for (const e of dEvents) {
         const k = normalizeAbility(e.ability || "");
         if (!k) continue;
-        const amt = Number((e as any).amount ?? (e as any).dmg ?? (e as any).value ?? 0);
-        if (!Number.isFinite(amt)) continue;
-        const isCrit = ((e.flags || "") + "").toLowerCase().includes("crit");
-        const prev = critByKey.get(k) || { dmg: 0, critDmg: 0 };
-        prev.dmg += amt;
-        if (isCrit) prev.critDmg += amt;
-        critByKey.set(k, prev);
+
+        // Don't count periodic ticks as "hits" for crit/strikethrough rate
+        if (k === "periodic") continue;
+
+        const f = String(e.flags || "").toLowerCase();
+        const isCrit = f.includes("crit");
+        const isST = f.includes("strikethrough") || f.includes("strikes through") || f.includes("strike through");
+
+        const prev = statsByKey.get(k) || { hits: 0, critHits: 0, stHits: 0, blockedTotal: 0, evadedTotal: 0 };
+        prev.hits += 1;
+        if (isCrit) prev.critHits += 1;
+        if (isST) {
+          prev.stHits += 1;
+          prev.blockedTotal += Number((e as any).blocked ?? 0);
+        }
+        statsByKey.set(k, prev);
       }
 
-      const topAbilities = top.map((a) => {
+
+            const topAbilities = top.map((a) => {
         const share = totalDamage > 0 ? a.dmg / totalDamage : 0; // fraction
-        const cd = critByKey.get(a.key);
-        const critPct = cd && cd.dmg > 0 ? cd.critDmg / cd.dmg : 0; // fraction of ability dmg that was crit
-        return { ability: a.ability, dmg: a.dmg, share, pctOfTotal: share, critPct };
+        const st = statsByKey.get(a.key);
+        const critPct = st && st.hits > 0 ? st.critHits / st.hits : 0; // crit rate (crits / hits)
+        const strikeThroughPct = st && st.hits > 0 ? st.stHits / st.hits : 0; // ST rate (ST / hits)
+        const strikeThroughValue = st && st.stHits > 0 ? ((st.blockedTotal > 0 ? st.blockedTotal : st.evadedTotal) / st.stHits) : 0; // avg blocked on ST; fallback to avg ST% roll
+        return { ability: a.ability, dmg: a.dmg, share, pctOfTotal: share, critPct, strikeThroughPct, strikeThroughValue };
       });
 
       const utilAgg = utilityByPlayerCanon?.[canonPlayer(name)] || {};
@@ -909,14 +930,27 @@ for (const r of rows) {
     };
   }, [rosterNames, byPlayer, damageEvents, duration, globalActiveCount]);
 
+  // Damage events grouped by canonical player name (used in compare signatures for crit/strikethrough stats)
+  const dEventsByName = useMemo(() => {
+    const map: Record<string, any[]> = {};
+    for (const e of (damageEvents || []) as any[]) {
+      const src = canonPlayer(e?.src || "");
+      if (!src) continue;
+      // Only outgoing damage for this source (ignore incoming/taken entries if present)
+      if (typeof isIncomingDamage === "function" && isIncomingDamage(e)) continue;
+      (map[src] ||= []).push(e);
+    }
+    return map;
+  }, [damageEvents]);
+
     const signatureCompare = useMemo(() => {
-    if (!isCompare) return [] as Array<{ ability: string; cells: Array<{ name: string; dmg: number; share: number; critPct: number; pctOfTotal: number }> }>;
+    if (!isCompare) return [] as Array<{ ability: string; cells: Array<{ name: string; dmg: number; share: number; critPct: number; strikeThroughPct: number; strikeThroughValue: number; pctOfTotal: number }> }>;
 
     const names = selectedStats.map((s) => s.name);
 
     // Build per-player maps using full perAbility (not just each player's top10),
     // and normalize ability names to avoid split buckets.
-    const perNameMap: Record<string, Map<string, { display: string; dmg: number; critDmg: number }>> = {};
+    const perNameMap: Record<string, Map<string, { display: string; dmg: number; critDmg: number; hits: number; stHits: number; blockedTotal: number }>> = {};
     for (const n of names) {
       perNameMap[n] = new Map();
       const raw = perAbility?.[n] || {};
@@ -925,22 +959,33 @@ for (const r of rows) {
         if (!key) continue;
         const dmg = (v as any)?.dmg || 0;
         const prev = perNameMap[n].get(key);
-        if (!prev) perNameMap[n].set(key, { display: ability, dmg, critDmg: 0 });
-        else perNameMap[n].set(key, { display: prev.display, dmg: prev.dmg + dmg, critDmg: prev.critDmg });
+        if (!prev) perNameMap[n].set(key, { display: ability, dmg, critDmg: 0, hits: 0, stHits: 0, blockedTotal: 0 });
+        else perNameMap[n].set(key, { display: prev.display, dmg: prev.dmg + dmg, critDmg: prev.critDmg, hits: prev.hits, stHits: prev.stHits, blockedTotal: prev.blockedTotal });
       }
 
-      // add crit damage from raw events (more accurate than hit-count)
-      const dEvents = (damageEvents || []).filter((e) => e?.src === n);
-      for (const e of dEvents) {
+      // add crit damage + strikethrough hit stats from raw events
+      for (const e of dEventsByName[n] || []) {
         const key = normalizeAbility(e.ability || "");
-        if (!key) continue;
-        const amt = Number((e as any).amount ?? (e as any).dmg ?? (e as any).value ?? 0);
-        if (!Number.isFinite(amt)) continue;
-        const isCrit = ((e.flags || "") + "").toLowerCase().includes("crit");
-        if (!isCrit) continue;
+        if (!key || key === "periodic") continue;
+
+        const amt = Number(e.amount || 0);
+        const f = String(e.flags || "").toLowerCase();
+        const isCrit = f.includes("crit");
+        const isST = f.includes("strikethrough") || f.includes("strikes through") || f.includes("strike through");
+
         const prev = perNameMap[n].get(key);
-        if (prev) prev.critDmg += amt;
+        if (!prev) continue;
+
+        prev.hits += 1;
+
+        if (isCrit) prev.critDmg += amt;
+
+        if (isST) {
+          prev.stHits += 1;
+          prev.blockedTotal += Number((e as any).blocked ?? 0);
+        }
       }
+
     }
 
     const abilityKeys = new Set<string>();
@@ -971,7 +1016,9 @@ for (const r of rows) {
           const total = byPlayer[name]?.totalDamage || 0;
           const pctOfTotal = total > 0 ? dmg / total : 0; // fraction (0-1)
           const critPct = dmg > 0 ? (cell?.critDmg || 0) / dmg : 0; // fraction (0-1)
-          return { name, dmg, share, critPct, pctOfTotal };
+          const strikeThroughPct = cell && cell.hits > 0 ? cell.stHits / cell.hits : 0;
+          const strikeThroughValue = cell && cell.stHits > 0 ? cell.blockedTotal / cell.stHits : 0;
+          return { name, dmg, share, critPct, strikeThroughPct, strikeThroughValue, pctOfTotal };
         }),
       };
     });
@@ -2042,6 +2089,8 @@ const toggleSection = (id: SectionId) => setSectionOpen((s) => ({ ...s, [id]: !s
                         const dmg = row ? fmtNum(row.dmg) : "—";
                         const share = row ? fmtPct(row.share) : "—";
                         const crit = row ? fmtPct(row.critPct) : "—";
+                        const stPct = row ? fmtPct(row.strikeThroughPct) : "—";
+                        const stVal = row ? fmtNum(Math.round(row.strikeThroughValue || 0)) : "—";
                         return (
                           <div
                             key={`${ability}-${i}`}
@@ -2065,6 +2114,7 @@ const toggleSection = (id: SectionId) => setSectionOpen((s) => ({ ...s, [id]: !s
                             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
                               <span style={pill}>% of Total Damage: <strong>{share}</strong></span>
                               <span style={pill}>Crit: <strong>{crit}</strong></span>
+                              <span style={pill}>ST: <strong>{stPct} • {stVal}</strong></span>
                             </div>
                           </div>
                         );
@@ -2142,6 +2192,8 @@ const toggleSection = (id: SectionId) => setSectionOpen((s) => ({ ...s, [id]: !s
                                         <span style={pill}>Damage: <strong>{fmtNum(c.dmg)}</strong></span>
                                         <span style={pill}>Share: <strong>{fmtPct(c.share)}</strong></span>
                                         <span style={pill}>% of Total Damage: <strong>{fmtPct(c.pctOfTotal)}</strong></span>
+                                        <span style={pill}>Crit: <strong>{fmtPct(c.critPct)}</strong></span>
+                                        <span style={pill}>ST: <strong>{fmtPct(c.strikeThroughPct)} • {fmtNum(Math.round(c.strikeThroughValue || 0))}</strong></span>
                                       </div>
                                     </div>
                                   </div>

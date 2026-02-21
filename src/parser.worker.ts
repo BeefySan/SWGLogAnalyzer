@@ -51,10 +51,10 @@ const toSec = (hh: string, mm: string, ss: string) => +hh * 3600 + +mm * 60 + +s
 // ---------- Event regexes ----------
 // NOTE: this version CAPTURES the "hits|glances|crits|..." group as m[4]
 const RX_DMG_WITH =
-  /^(.+?)\s+attacks\s+(.+?)\s+(?:with|using)\s+(.+?)\s+(?:and\s+(hits|glances|crits|strikes\s+through|punishing\s+blows))?(?:\s*\((\d+)\s*%(?:\s*evaded)?\))?\s*for\s+(\d+)\s+points/i;
+  /^(.+?)\s+attacks\s+(.+?)\s+(?:with|using)\s+(.+?)\s+(?:and\s+(hits|glances|crits|critically\s+hits|critical\s+hits|strikes\s+through|punishing\s+blows))?(?:\s*\((\d+)\s*%(?:\s*evaded)?\))?\s*for\s+(\d+)\s+points/i;
 
 const RX_DMG_BARE =
-  /^(.+?)\s+attacks\s+(.+?)(?:\s+and\s+)?(?:(hits|glances|crits|strikes\s+through|punishing\s+blows))?(?:\s*\((\d+)\s*%(?:\s*evaded)?\))?\s*for\s+(\d+)\s+points/i;
+  /^(.+?)\s+attacks\s+(.+?)(?:\s+and\s+)?(?:(hits|glances|crits|critically\s+hits|critical\s+hits|strikes\s+through|punishing\s+blows))?(?:\s*\((\d+)\s*%(?:\s*evaded)?\))?\s*for\s+(\d+)\s+points/i;
 
 const RX_DMG_GENERIC =
   /^(.+?)\s+damages\s+(.+?)\s+for\s+(\d+)\s+points(?:\s+(?:with|using)\s+(.+?))?$/i;
@@ -88,7 +88,7 @@ const RX_DEATH = /^(.+?)\s+is\s+no\s+more\./i;
 const RX_PERFORM = /^(.+?)\s+performs\s+(.+?)\.?\s*$/i;
 
 // Helpers
-const RX_POINTS_BLOCKED = /\((\d+)\s+points\s+blocked\)/i;
+const RX_POINTS_BLOCKED = /\((?:[^)]*?,\s*)?(\d+)\s+points\s+blocked\)/i;
 const RX_ARMOR_ABSORB = /Armor\s+absorbed\s+(\d+)\s+points\s+out\s+of\s+(\d+)/i;
 const RX_ABSORB_SIMPLE = /\((\d+)\s+absorbed(?:\s*\/\s*(\d+)\s+resisted\.?)*\)/i;
 const RX_EVADED_PCT = /\((\d+)\s*%(?:\s*evaded)?\)/i;
@@ -564,7 +564,7 @@ const deathEvents: Array<{ t: number; name: string }> = []; // DECLARED
         if (60000 && amount > 60000) { parsed++; continue; }
 
         const flag =
-          kindRaw === "crits"
+          (kindRaw === "crits" || kindRaw === "critically hits" || kindRaw === "critical hits")
             ? "crit"
             : kindRaw === "hits"
             ? "hit"
@@ -602,7 +602,7 @@ const deathEvents: Array<{ t: number; name: string }> = []; // DECLARED
         if (60000 && amount > 60000) { parsed++; continue; }
 
         const flag =
-          kindRaw === "crits"
+          (kindRaw === "crits" || kindRaw === "critically hits" || kindRaw === "critical hits")
             ? "crit"
             : kindRaw === "hits"
             ? "hit"

@@ -1,13 +1,4 @@
 import React, { useState, useMemo } from 'react';
-
-function useDebounced(value, delay = 100) {
-  const [v, setV] = React.useState(value);
-  useEffect(() => {
-    const id = setTimeout(() => setV(value), delay);
-    return () => clearTimeout(id);
-  }, [value, delay]);
-  return v;
-}
 import { saveAs } from 'file-saver';
 
 function parseEncounters(events, gapMs = 30000) {
@@ -75,35 +66,23 @@ function computeCombatStats(events) {
 }
 
 export default function LogAnalyzer({ events }) {
-  const [isPending, startTransition] = useTransition();
   const [player, setPlayer] = useState('');
   const [target, setTarget] = useState('');
   const [ability, setAbility] = useState('');
-  
-  const dPlayer  = useDebounced(player, 100);
-  const dTarget  = useDebounced(target, 100);
-  const dAbility = useDebounced(ability, 100);
-
-  // Compile matchers once per debounced value
-  const playerMatch  = useMemo(() => dPlayer  ? (s => s && s.toLowerCase().includes(dPlayer.toLowerCase())) : null, [dPlayer]);
-  const targetMatch  = useMemo(() => dTarget  ? (s => s && s.toLowerCase().includes(dTarget.toLowerCase())) : null, [dTarget]);
-  const abilityMatch = useMemo(() => dAbility ? (s => s && s.toLowerCase().includes(dAbility.toLowerCase())) : null, [dAbility]);
-const [gapSec, setGapSec] = useState(30);
+  const [gapSec, setGapSec] = useState(30);
   const [encounters, setEncounters] = useState([]);
-  const MAX_LIST = 200;
 
   const allPlayers = useMemo(() => Array.from(new Set(events.map(e => e.source).filter(Boolean))).sort(), [events]);
   const allTargets = useMemo(() => Array.from(new Set(events.map(e => e.target).filter(Boolean))).sort(), [events]);
   const allAbilities = useMemo(() => Array.from(new Set(events.map(e => e.ability).filter(Boolean))).sort(), [events]);
 
   const filteredEvents = useMemo(() => {
-    return events.filter(e => {
-      if (playerMatch && !playerMatch(e.source)) return false;
-      if (targetMatch && !targetMatch(e.target)) return false;
-      if (abilityMatch && !abilityMatch(e.ability)) return false;
-      return true;
-    });
-  }, [events, playerMatch, targetMatch, abilityMatch]);
+    return events.filter(e => (
+      (!player  || e.source === player) &&
+      (!target  || e.target === target) &&
+      (!ability || e.ability === ability)
+    ));
+  }, [events, player, target, ability]);
 
   const stats = useMemo(() => computeCombatStats(filteredEvents), [filteredEvents]);
 

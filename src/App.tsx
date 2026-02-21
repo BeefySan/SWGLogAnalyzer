@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback, useTransition, useDeferredValue, useLayoutEffect } from "react";
-import { AnimatePresence, motion } from "framer-motion";
 import { createPortal } from "react-dom";
 import ErrorBoundary from "./ErrorBoundary";
 import DpsPopoutButton from "./components/DpsPopoutButton";
@@ -118,10 +117,7 @@ function SmartTooltipBox({ depKey, children, cardId }: SmartTooltipBoxProps) {
 
 function DeathSecondHoverPopup({ i, secondsTotal, hb, db, fmt0 }: HoverPopupProps) {
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.18, ease: 'easeOut' }}
+    <div
       style={{
         position: 'absolute',
         left: 0,
@@ -238,7 +234,7 @@ function DeathSecondHoverPopup({ i, secondsTotal, hb, db, fmt0 }: HoverPopupProp
           )}
         </div>
       </div>
-    </motion.div>
+    </div>
   );
 }
 
@@ -2182,438 +2178,9 @@ function TopRibbon(props:{
     </>
   );
 }
-
-/* ========================= Welcome Screen ========================= */
-
-type AnalyzerMode = "pve" | "pvp";
-
-function WelcomeScreen({ onSelect }: { onSelect: (mode: AnalyzerMode) => void }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [progress, setProgress] = useState(0);
-  const [ready, setReady] = useState(false);
-  const [tipIdx, setTipIdx] = useState(0);
-  const [burstKey, setBurstKey] = useState(0);
-  const [exiting, setExiting] = useState(false);
-  const [chosenMode, setChosenMode] = useState<AnalyzerMode | null>(null);
-
-  const tips = useMemo(
-    () => [
-      "Parsing tip: Larger logs take longer—keep the tab open while it indexes.",
-      "Crit % tip: Small sample sizes can swing wildly—check hit counts per ability.",
-      "Healing tip: Overheal spikes often mean late swaps or stacked healers.",
-      "APM tip: Bursts usually align with cooldown windows—compare with damage spikes.",
-      "Timeline tip: Segment labels help isolate phases—zoom in for precision.",
-    ],
-    []
-  );
-
-  // progress boot sequence (purely cosmetic)
-  useEffect(() => {
-    let raf = 0;
-    const start = performance.now();
-    const duration = 2600;
-
-    const tick = () => {
-      const t = performance.now();
-      const ratio = Math.min(1, (t - start) / duration);
-      const eased = 1 - Math.pow(1 - ratio, 3);
-      setProgress(Math.floor(eased * 100));
-      if (ratio >= 1) {
-        setTimeout(() => setReady(true), 350);
-        return;
-      }
-      raf = requestAnimationFrame(tick);
-    };
-
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
-
-  // rotate tips
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      setTipIdx((v) => (v + 1) % tips.length);
-    }, 2600);
-    return () => window.clearInterval(id);
-  }, [tips.length]);
-
-  // starfield canvas
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    let raf = 0;
-    let w = 0;
-    let h = 0;
-
-    const rand = (min: number, max: number) => min + Math.random() * (max - min);
-
-    const resize = () => {
-      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-      const rect = canvas.getBoundingClientRect();
-      w = Math.max(1, Math.floor(rect.width * dpr));
-      h = Math.max(1, Math.floor(rect.height * dpr));
-      canvas.width = w;
-      canvas.height = h;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-    };
-
-    resize();
-    window.addEventListener("resize", resize);
-
-    const stars = new Array(240).fill(0).map(() => ({
-      x: rand(0, w),
-      y: rand(0, h),
-      z: rand(0.2, 1.0),
-      r: rand(0.6, 1.8),
-      vy: rand(0.4, 1.25),
-      tw: rand(0, Math.PI * 2),
-    }));
-
-    const draw = () => {
-      raf = requestAnimationFrame(draw);
-      ctx.clearRect(0, 0, w, h);
-
-      // subtle vignette
-      const g = ctx.createRadialGradient(w * 0.5, h * 0.5, 0, w * 0.5, h * 0.5, Math.max(w, h) * 0.7);
-      g.addColorStop(0, "rgba(0,0,0,0.00)");
-      g.addColorStop(1, "rgba(0,0,0,0.60)");
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, w, h);
-
-      for (const s of stars) {
-        s.tw += 0.04 + s.z * 0.03;
-        const twinkle = 0.55 + 0.45 * Math.sin(s.tw);
-
-        s.y += s.vy * (1 + s.z * 1.4);
-        if (s.y > h + 10) {
-          s.y = -10;
-          s.x = rand(0, w);
-        }
-
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, s.r * (0.6 + s.z), 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255,255,255,${0.10 + 0.25 * twinkle * s.z})`;
-        ctx.fill();
-      }
-    };
-
-    draw();
-
-    return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener("resize", resize);
-    };
-  }, []);
-
-  const triggerBurst = () => setBurstKey((v) => v + 1);
-
-  const handleSelect = (mode: AnalyzerMode) => {
-    if (!ready || exiting) return;
-    setChosenMode(mode);
-    setExiting(true);
-    triggerBurst();
-    // Let the UI animate out before switching analyzers
-    window.setTimeout(() => onSelect(mode), 750);
-  };
-
-  return (
-    <motion.div
-      className="swg-welcome-root"
-      role="dialog"
-      aria-label="Welcome"
-      initial={{ opacity: 1, scale: 1 }}
-      animate={{ opacity: exiting ? 0 : 1, scale: exiting ? 1.01 : 1 }}
-      exit={{ opacity: 0, scale: 1.01 }}
-      transition={{ duration: 0.55, ease: "easeOut" }}
-    >
-      <style>{`
-        .swg-welcome-root{
-          position:fixed; inset:0; z-index:9999; overflow:hidden;
-          background:#000 url(/mainmenu.jpg) center/55% auto no-repeat;
-          font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-          color:#fff;
-        }
-        .swg-welcome-overlayA{ position:absolute; inset:0; background:linear-gradient(to bottom, rgba(0,0,0,.78), rgba(0,0,0,.25) 45%, rgba(0,0,0,.86)); }
-        .swg-welcome-overlayB{ position:absolute; inset:0; background:radial-gradient(circle at 50% 20%, rgba(255,255,255,.10), rgba(0,0,0,.65) 55%, rgba(0,0,0,.92) 100%); }
-        .swg-welcome-scanlines{ position:absolute; inset:0; opacity:.10; background:repeating-linear-gradient(to bottom, rgba(255,255,255,.06) 0px, rgba(255,255,255,.06) 1px, rgba(0,0,0,0) 6px); mix-blend-mode: overlay; }
-        .swg-welcome-wrap{ position:relative; height:100%; width:100%; max-width:2200px; margin:0 auto; padding:36px 14px; display:flex; flex-direction:column; }
-        .swg-welcome-top{ display:flex; justify-content:space-between; align-items:center; gap:14px; }
-        .swg-welcome-boot{ letter-spacing:.35em; font-size:12px; opacity:.72; }
-        .swg-welcome-build{ font-size:12px; opacity:.62; background:rgba(255,255,255,.08); padding:6px 10px; border-radius:999px; }
-        .swg-welcome-center{ flex:1; display:grid; align-items:center; grid-template-columns: 1fr 1fr; gap:220px; padding:0 64px; }
-        @media (max-width: 980px){ .swg-welcome-center{ grid-template-columns: 1fr; } }
-        .swg-welcome-center > div:first-child{ justify-self:start; }
-        .swg-welcome-panel{ justify-self:end; }
-        @media (max-width: 1200px){ .swg-welcome-center{ padding:0 24px; gap:64px; } }
-        @media (max-width: 980px){ .swg-welcome-center{ padding:0; } .swg-welcome-panel{ justify-self:start; } }
-
-        .swg-welcome-title{
-          font-size:44px; line-height:1.05; font-weight:800;
-          text-shadow: 0 0 22px rgba(255,255,255,.22), 0 0 60px rgba(120,200,255,.14);
-        }
-        .swg-welcome-sub{ margin-top:12px; font-size:14px; opacity:.78; max-width:760px; }
-        .swg-welcome-panel{
-          background: rgba(0,0,0,.42); border:1px solid rgba(255,255,255,.14);
-          border-radius: 18px; padding:18px 18px 16px;
-          box-shadow: 0 18px 60px rgba(0,0,0,.45);
-          backdrop-filter: blur(10px);
-        }
-        .swg-welcome-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
-        .swg-welcome-bar{
-          position:relative; height:10px; width:100%; border-radius:999px;
-          background: rgba(255,255,255,.10); overflow:hidden;
-          box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
-        }
-        .swg-welcome-bar > div{
-          height:100%; border-radius:999px;
-          background: linear-gradient(90deg, rgba(255,255,255,.25), rgba(255,255,255,.85), rgba(255,255,255,.25));
-          width: 0%;
-          transition: width 120ms linear;
-        }
-        .swg-welcome-tip{ margin-top:12px; font-size:12px; opacity:.78; min-height:18px; }
-        .swg-welcome-btns{ display:flex; gap:12px; margin-top:14px; }
-        @media (max-width: 520px){ .swg-welcome-btns{ flex-direction:column; } }
-        .swg-btn{
-          position:relative; flex:1;
-          border-radius:14px;
-          padding:12px 14px;
-          background: rgba(255,255,255,.10);
-          border: 1px solid rgba(255,255,255,.18);
-          color:#fff; font-weight:800; letter-spacing:.08em;
-          cursor:pointer;
-          transition: transform 120ms ease, background 160ms ease, border-color 160ms ease;
-          user-select:none;
-          text-transform: uppercase;
-        }
-        .swg-btn:disabled{ opacity:.45; cursor:not-allowed; }
-        .swg-btn:hover:not(:disabled){ transform: translateY(-1px); background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.30); }
-        .swg-btn:active:not(:disabled){ transform: translateY(0px); }
-        .swg-btn::after{
-          content:""; position:absolute; inset:-2px; border-radius:16px;
-          background: radial-gradient(circle at 20% 0%, rgba(255,255,255,.22), rgba(0,0,0,0) 55%);
-          opacity:.35; pointer-events:none;
-        }
-        .swg-badge{
-          display:inline-flex; align-items:center; gap:8px; font-size:11px; opacity:.86;
-          padding:6px 10px; border-radius:999px;
-          background: rgba(0,0,0,.32);
-          border: 1px solid rgba(255,255,255,.12);
-        }
-        .swg-crawl{
-          position:relative; height:120px; overflow:hidden; margin-top:18px;
-          border-radius:16px; border:1px solid rgba(255,255,255,.10);
-          background: rgba(0,0,0,.28);
-        }
-        .swg-crawl-inner{
-          position:absolute; left:0; right:0; bottom:-120px;
-          padding:16px;
-          animation: swgCrawl 12s linear infinite;
-          font-size:12px; opacity:.75; line-height:1.6;
-          text-align:center;
-        }
-        @keyframes swgCrawl{
-          0%{ transform: translateY(0) skewX(-4deg); opacity:.0;}
-          6%{ opacity:.75;}
-          100%{ transform: translateY(-360px) skewX(-4deg); opacity:0;}
-        }
-        .swg-holo{
-          margin-top:14px;
-          display:flex; flex-wrap:wrap; gap:10px;
-          opacity:.85;
-        }
-        .swg-holo span{
-          border:1px solid rgba(255,255,255,.12);
-          background: rgba(255,255,255,.08);
-          padding:8px 10px; border-radius:12px;
-          font-size:11px; letter-spacing:.10em;
-        }
-      `}</style>
-
-      <canvas
-        ref={canvasRef}
-        className="swg-welcome-canvas"
-        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", mixBlendMode: "screen", opacity: 0.9 }}
-      />
-
-      <div className="swg-welcome-overlayA" />
-      <div className="swg-welcome-overlayB" />
-      <div className="swg-welcome-scanlines" />
-
-      {/* hyperspace burst overlay */}
-      <AnimatePresence>
-        {burstKey > 0 && (
-          <motion.div
-            key={burstKey}
-            style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.55 }}
-          >
-            {Array.from({ length: 46 }).map((_, i) => (
-              <motion.div
-                key={i}
-                style={{
-                  position: "absolute",
-                  left: "50%",
-                  top: "50%",
-                  width: 320,
-                  height: 2,
-                  transformOrigin: "0% 50%",
-                  transform: `rotate(${(360 / 46) * i + 7.5}deg) translateX(0px)`,
-                  borderRadius: 999,
-                  background:
-                    "linear-gradient(90deg, rgba(255,255,255,0.0), rgba(255,255,255,0.65), rgba(255,255,255,0.0))",
-                  filter: "blur(0.8px)",
-                }}
-                initial={{ opacity: 0, scaleX: 0.05 }}
-                animate={{ opacity: 0.75, scaleX: 1.15 }}
-                exit={{ opacity: 0, scaleX: 0.05 }}
-                transition={{ duration: 0.55, ease: "easeOut" }}
-              />
-            ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <div className="swg-welcome-wrap">
-        <div className="swg-welcome-top">
-          <div className="swg-welcome-boot">SWG • LOG ANALYZER • INITIALIZING</div>
-          <div className="swg-welcome-build">Boot: {progress}%</div>
-        </div>
-
-        <div className="swg-welcome-center">
-          <div>
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.9, ease: "easeOut" }}
-              className="swg-welcome-title"
-            >
-              Welcome to the
-              <br />
-              Star Wars Galaxies
-              <br />
-              Log Analyzer
-            </motion.div>
-
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.15, duration: 0.9, ease: "easeOut" }}
-              className="swg-welcome-sub"
-            >
-              Your combat telemetry, decoded. Choose a mode to proceed.
-            </motion.div>
-
-            <div className="swg-holo">
-              <span>CRIT%</span>
-              <span>DPS/HPS</span>
-              <span>SEGMENTS</span>
-              <span>UTILITY</span>
-              <span>DEATHS</span>
-              <span>COMPARE</span>
-            </div>
-          </div>
-
-          <motion.div
-            className="swg-welcome-panel"
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.85, ease: "easeOut" }}
-          >
-            <div className="swg-welcome-row" style={{ marginBottom: 8 }}>
-              <div className="swg-badge">SYSTEM STATUS</div>
-              <div style={{ fontSize: 12, opacity: 0.8 }}>
-                {ready ? "READY" : "LOADING"}
-              </div>
-            </div>
-
-            <div className="swg-welcome-bar" aria-label="Loading">
-              <div style={{ width: `${progress}%` }} />
-            </div>
-
-            <div className="swg-welcome-tip">
-              <AnimatePresence mode="wait">
-                <motion.div
-                  key={tipIdx}
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -6 }}
-                  transition={{ duration: 0.25 }}
-                >
-                  {tips[tipIdx]}
-                </motion.div>
-              </AnimatePresence>
-            </div>
-
-            <div className="swg-welcome-btns">
-              <button
-                className="swg-btn"
-                disabled={!ready}                onClick={() => handleSelect("pve")}
-              >
-                PVE Analyzer
-              </button>
-
-              <button
-                className="swg-btn"
-                disabled={!ready}                onClick={() => handleSelect("pvp")}
-              >
-                PVP Analyzer
-              </button>
-            </div>
-
-            {exiting && (
-              <div className="swg-exit-overlay" aria-hidden>
-                <div className="swg-exit-panel">
-                  <div className="swg-exit-title">Engaging Hyperdrive</div>
-                  <div className="swg-exit-sub">
-                    Loading {chosenMode === "pvp" ? "PVP" : "PVE"} Analyzer…
-                  </div>
-                  <div className="swg-exit-bar">
-                    <div className="swg-exit-fill" />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div className="swg-crawl" aria-hidden>
-              <div className="swg-crawl-inner">
-                <div style={{ fontWeight: 800, letterSpacing: ".18em", opacity: 0.95 }}>
-                  INITIALIZING ANALYSIS CORE
-                </div>
-                <div style={{ marginTop: 10 }}>
-                  Parsing • Normalization • Event Linking • Outcome Inference • Segment Mapping
-                </div>
-                <div style={{ marginTop: 10 }}>
-                  May your crits be plentiful and your overheal be intentional.
-                </div>
-              </div>
-            </div>
-
-            <div style={{ marginTop: 12, fontSize: 11, opacity: 0.65, lineHeight: 1.5 }}>
-              Note: PVP mode will share the same app + files; we’ll unlock the PVP-specific views next.
-            </div>
-          </motion.div>
-        </div>
-
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11, opacity: 0.55 }}>
-          <div>© {new Date().getFullYear()} • SWG Log Analyzer</div>
-          <div>“Punch it.”</div>
-        </div>
-      </div>
-    </motion.div>
-  );
-}
-
 /* ========================= Main App ========================= */
 
 export default function App(){
-  const [showWelcome, setShowWelcome] = useState<boolean>(true);
-  const [analyzerMode, setAnalyzerMode] = useState<AnalyzerMode>("pve");
   const [focusLine, setFocusLine] = React.useState<string | null>(null);
   // raw/unfiltered results from worker
 const [timelineStep, setTimelineStep] = useState<number>(1);
@@ -3067,6 +2634,13 @@ const resetWindow = useCallback(() => {
       const snaps: SegSnap[] = segsToRender.map((s) => {
         const displayName = normalizeSegmentName(s.label || s.baseName || "Segment") || (s.label || "Segment");
 
+	        // Export should never rank NPCs as "top" contributors. We skip any actor that looks like an NPC
+	        // (either by generic heuristics or by our explicit segment-NPC map).
+	        const isExcludedFromExportRanks = (name: string) => {
+	          if (!name) return true;
+	          return isLikelyNpcName(name) || isSegmentNpcName(name);
+	        };
+
         // Use per-part ranges so merged/non-contiguous segments aggregate correctly.
         const ranges = (s.parts || []).map(p => {
           const a = Math.max(0, Math.floor((p as any).start));
@@ -3093,14 +2667,16 @@ const resetWindow = useCallback(() => {
           if (!e) continue;
           const t = e.t;
           if (!inRanges(t)) continue;
-          const src = canonDyn(e.src);
+	          const src = canonDyn(e.src);
+	          if (isExcludedFromExportRanks(src)) continue;
           dmgBy[src] = (dmgBy[src] || 0) + (e.amount || 0);
         }
         for (const e of healEvents) {
           if (!e) continue;
           const t = e.t;
           if (!inRanges(t)) continue;
-          const src = canonDyn(e.src);
+	          const src = canonDyn(e.src);
+	          if (isExcludedFromExportRanks(src)) continue;
           healBy[src] = (healBy[src] || 0) + (e.amount || 0);
         }
 
@@ -3112,7 +2688,8 @@ const resetWindow = useCallback(() => {
           if (!e) continue;
           const t = e.t;
           if (!inRanges(t)) continue;
-          const actor = canonDyn(e.src);
+	          const actor = canonDyn(e.src);
+	          if (isExcludedFromExportRanks(actor)) continue;
           const k = actor + "@" + t;
           if (seen.has(k)) continue;
           seen.add(k);
@@ -3123,7 +2700,8 @@ const resetWindow = useCallback(() => {
           const t = (e as any).t;
           if (!Number.isFinite(t)) continue;
           if (!inRanges(t)) continue;
-          const actor = canonDyn((e as any).src);
+	          const actor = canonDyn((e as any).src);
+	          if (isExcludedFromExportRanks(actor)) continue;
           const k = actor + "@" + t;
           if (seen.has(k)) continue;
           seen.add(k);
@@ -3166,14 +2744,16 @@ const resetWindow = useCallback(() => {
         if (!e) continue;
         const t = e.t;
         if (t < overallStart || t > overallEnd) continue;
-        const src = canonDyn(e.src);
+	        const src = canonDyn(e.src);
+	        if (isLikelyNpcName(src) || isSegmentNpcName(src)) continue;
         totalDmgBy[src] = (totalDmgBy[src] || 0) + (e.amount || 0);
       }
       for (const e of healEvents) {
         if (!e) continue;
         const t = e.t;
         if (t < overallStart || t > overallEnd) continue;
-        const src = canonDyn(e.src);
+	        const src = canonDyn(e.src);
+	        if (isLikelyNpcName(src) || isSegmentNpcName(src)) continue;
         totalHealBy[src] = (totalHealBy[src] || 0) + (e.amount || 0);
       }
 
@@ -3185,7 +2765,8 @@ const resetWindow = useCallback(() => {
         if (!e) continue;
         const t = e.t;
         if (t < overallStart || t > overallEnd) continue;
-        const actor = canonDyn(e.src);
+	        const actor = canonDyn(e.src);
+	        if (isLikelyNpcName(actor) || isSegmentNpcName(actor)) continue;
         const k = actor + "@" + t;
         if (seenTotal.has(k)) continue;
         seenTotal.add(k);
@@ -3196,7 +2777,8 @@ const resetWindow = useCallback(() => {
         const t = (e as any).t;
         if (!Number.isFinite(t)) continue;
         if (t < overallStart || t > overallEnd) continue;
-        const actor = canonDyn((e as any).src);
+	        const actor = canonDyn((e as any).src);
+	        if (isLikelyNpcName(actor) || isSegmentNpcName(actor)) continue;
         const k = actor + "@" + t;
         if (seenTotal.has(k)) continue;
         seenTotal.add(k);
@@ -5738,41 +5320,7 @@ const deathFlags = useMemo(() => {
 
   return <ErrorBoundary>
     <div className="swg-theme">
-      {/* Welcome / Main Menu */}
-      <AnimatePresence mode="wait">
-        {showWelcome && (
-          <WelcomeScreen
-          onSelect={(mode) => {
-            setAnalyzerMode(mode);
-            setShowWelcome(false);
-          }}
-        />
-        )}
-      </AnimatePresence>
-
-      
-      {analyzerMode === "pvp" && !showWelcome && (
-        <div
-          style={{
-            position: "fixed",
-            top: 12,
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 9000,
-            padding: "10px 14px",
-            borderRadius: 999,
-            background: "rgba(0,0,0,0.55)",
-            border: "1px solid rgba(255,255,255,0.18)",
-            backdropFilter: "blur(10px)",
-            fontSize: 12,
-            letterSpacing: ".08em",
-            textTransform: "uppercase",
-          }}
-        >
-          PVP mode selected — PVP-specific panels coming next (running PVE pipeline for now)
-        </div>
-      )}
-<style dangerouslySetInnerHTML={{ __html: SW_CSS }} />
+      <style dangerouslySetInnerHTML={{ __html: SW_CSS }} />
       <style dangerouslySetInnerHTML={{ __html: RIBBON_CSS }} />
       <style dangerouslySetInnerHTML={{ __html: RIBBON_EXTRA }} />
       <style dangerouslySetInnerHTML={{ __html: ENC_CSS }} />

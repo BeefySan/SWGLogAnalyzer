@@ -1848,6 +1848,7 @@ const NPC_TO_INSTANCE: Array<{ npc:string; inst:string }> = [
   { npc: 'an old man', inst: 'Dark Side Mellichae' }, // old man phase
   { npc: 'mellichae', inst: 'Light Side Mellichae' },
   { npc: 'tusken king', inst: 'Tusken King' },
+  { npc: 'tusken warlord', inst: 'Tusken King' },
   { npc: 'axkva min', inst: 'Axkva Min' },
   { npc: 'lelli hi', inst: 'Axkva Min' },
   { npc: 'gorvo', inst: 'Axkva Min' },

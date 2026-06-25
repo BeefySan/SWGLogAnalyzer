@@ -5879,7 +5879,7 @@ const deathFlags = useMemo(() => {
             </div>
             <label className="row" style={{gap:6}}>
               <span className="pill">Idle gap (s)</span>
-              <input className="input" style={{width:72}} type="number" min={30} step={10} value={idleGap} onChange={(e)=>setIdleGap(Math.max(10, Number(e.target.value||60)))} />
+              <input className="input" style={{width:72}} type="number" min={10} step={10} value={idleGap} onChange={(e)=>setIdleGap(Math.max(10, Number(e.target.value||30)))} />
             </label>
             <label className="row" style={{gap:6}}>
               <span className="pill">Segments:</span>
